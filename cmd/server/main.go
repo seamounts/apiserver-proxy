@@ -8,9 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	appsv1 "github.com/seamounts/apiserver-proxy/pkg/api/apps/v1"
-	batchv1 "github.com/seamounts/apiserver-proxy/pkg/api/batch/v1"
-	corev1 "github.com/seamounts/apiserver-proxy/pkg/api/core/v1"
+	"github.com/seamounts/apiserver-proxy/pkg/api"
 	"github.com/seamounts/apiserver-proxy/pkg/middleware"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"github.com/seamounts/apiserver-proxy/pkg/server"
@@ -69,14 +67,13 @@ func main() {
 			return &dbStorageAdapter{DBStorage: storage.NewDBStorage(db, nil, gvr)}, nil
 		})
 
-		if err := resourceRegistry.RegisterGroups(storageFactory,
-			corev1.NewCoreV1Group(),
-			appsv1.NewAppsV1Group(),
-			batchv1.NewBatchV1Group(),
-		); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to register groups: %v\n", err)
+		apiManager := api.DefaultAPIManager()
+		if err := apiManager.RegisterAll(resourceRegistry, storageFactory); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to register API groups: %v\n", err)
 			os.Exit(1)
 		}
+
+		fmt.Printf("Registered API groups: %v\n", apiManager.ListGroups())
 
 		customGVR := schema.GroupVersionResource{
 			Group:    "example.com",

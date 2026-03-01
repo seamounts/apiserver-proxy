@@ -177,21 +177,3 @@ func (r *ResourceRegistry) ListGroups() []*GroupInfo {
 func gvrKey(gvr schema.GroupVersionResource) string {
 	return fmt.Sprintf("%s/%s/%s", gvr.Group, gvr.Version, gvr.Resource)
 }
-
-type GroupRegistrar interface {
-	GroupName() string
-	RegisterResources(registry *ResourceRegistry, factory StorageFactory) error
-}
-
-func (r *ResourceRegistry) RegisterGroup(group GroupRegistrar, factory StorageFactory) error {
-	return group.RegisterResources(r, factory)
-}
-
-func (r *ResourceRegistry) RegisterGroups(factory StorageFactory, groups ...GroupRegistrar) error {
-	for _, group := range groups {
-		if err := group.RegisterResources(r, factory); err != nil {
-			return fmt.Errorf("failed to register group %s: %v", group.GroupName(), err)
-		}
-	}
-	return nil
-}

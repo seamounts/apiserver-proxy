@@ -1,4 +1,4 @@
-package v1
+package corev1
 
 import (
 	"fmt"
@@ -21,16 +21,12 @@ func (g *CoreV1Group) RegisterResources(r *registry.ResourceRegistry, factory re
 	gv := schema.GroupVersion{Group: "", Version: "v1"}
 
 	resources := map[string]ResourceStorage{
-		"pods":                   PodResource,
-		"services":               ServiceResource,
-		"configmaps":             ConfigMapResource,
-		"secrets":                SecretResource,
-		"namespaces":             NamespaceResource,
-		"nodes":                  NodeResource,
-		"persistentvolumes":      PersistentVolumeResource,
-		"persistentvolumeclaims": PersistentVolumeClaimResource,
-		"events":                 EventResource,
-		"endpoints":              EndpointsResource,
+		"pods":       PodResource,
+		"services":   ServiceResource,
+		"configmaps": ConfigMapResource,
+		"secrets":    SecretResource,
+		"namespaces": NamespaceResource,
+		"nodes":      NodeResource,
 	}
 
 	for resourceName, res := range resources {
