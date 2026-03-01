@@ -15,6 +15,10 @@ func NewNodeStorage(s registry.Storage) registry.Storage {
 }
 
 var NodeResource = types.APIResource{
+	Group:           "",
+	Version:         "v1",
+	Kind:            "Node",
+	Resource:        "nodes",
 	SingularName:    "node",
 	NamespaceScoped: false,
 	ShortNames:      []string{"no"},

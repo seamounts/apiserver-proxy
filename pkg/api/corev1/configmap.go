@@ -15,6 +15,10 @@ func NewConfigMapStorage(s registry.Storage) registry.Storage {
 }
 
 var ConfigMapResource = types.APIResource{
+	Group:           "",
+	Version:         "v1",
+	Kind:            "ConfigMap",
+	Resource:        "configmaps",
 	SingularName:    "configmap",
 	NamespaceScoped: true,
 	ShortNames:      []string{"cm"},

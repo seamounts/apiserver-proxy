@@ -15,6 +15,10 @@ func NewNamespaceStorage(s registry.Storage) registry.Storage {
 }
 
 var NamespaceResource = types.APIResource{
+	Group:           "",
+	Version:         "v1",
+	Kind:            "Namespace",
+	Resource:        "namespaces",
 	SingularName:    "namespace",
 	NamespaceScoped: false,
 	ShortNames:      []string{"ns"},

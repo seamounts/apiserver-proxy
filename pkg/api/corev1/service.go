@@ -15,6 +15,10 @@ func NewServiceStorage(s registry.Storage) registry.Storage {
 }
 
 var ServiceResource = types.APIResource{
+	Group:           "",
+	Version:         "v1",
+	Kind:            "Service",
+	Resource:        "services",
 	SingularName:    "service",
 	NamespaceScoped: true,
 	ShortNames:      []string{"svc"},

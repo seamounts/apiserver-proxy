@@ -56,6 +56,10 @@ func (s *DeploymentStorage) List(ctx context.Context, options *metav1.ListOption
 }
 
 var DeploymentResource = types.APIResource{
+	Group:           "apps",
+	Version:         "v1",
+	Kind:            "Deployment",
+	Resource:        "deployments",
 	SingularName:    "deployment",
 	NamespaceScoped: true,
 	ShortNames:      []string{"deploy"},

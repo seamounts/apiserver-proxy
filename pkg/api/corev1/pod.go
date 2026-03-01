@@ -244,6 +244,10 @@ func (s *PodStorage) sanitizePod(pod *corev1.Pod) {
 }
 
 var PodResource = types.APIResource{
+	Group:           "",
+	Version:         "v1",
+	Kind:            "Pod",
+	Resource:        "pods",
 	SingularName:    "pod",
 	NamespaceScoped: true,
 	ShortNames:      []string{"po"},

@@ -15,6 +15,10 @@ func NewJobStorage(s registry.Storage) registry.Storage {
 }
 
 var JobResource = types.APIResource{
+	Group:           "batch",
+	Version:         "v1",
+	Kind:            "Job",
+	Resource:        "jobs",
 	SingularName:    "job",
 	NamespaceScoped: true,
 	Categories:      []string{"all"},

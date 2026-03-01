@@ -15,6 +15,10 @@ func NewSecretStorage(s registry.Storage) registry.Storage {
 }
 
 var SecretResource = types.APIResource{
+	Group:           "",
+	Version:         "v1",
+	Kind:            "Secret",
+	Resource:        "secrets",
 	SingularName:    "secret",
 	NamespaceScoped: true,
 	ShortNames:      []string{"sec"},

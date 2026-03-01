@@ -5,7 +5,6 @@ import (
 
 	"github.com/seamounts/apiserver-proxy/pkg/api/types"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
 type CoreV1Group struct{}
@@ -19,20 +18,17 @@ func (g *CoreV1Group) GroupName() string {
 }
 
 func (g *CoreV1Group) RegisterResources(r *registry.ResourceRegistry, factory registry.StorageFactory) error {
-	gv := schema.GroupVersion{Group: "", Version: "v1"}
-
-	resources := map[string]types.APIResource{
-		"pods":       PodResource,
-		"services":   ServiceResource,
-		"configmaps": ConfigMapResource,
-		"secrets":    SecretResource,
-		"namespaces": NamespaceResource,
-		"nodes":      NodeResource,
+	resources := []types.APIResource{
+		PodResource,
+		ServiceResource,
+		ConfigMapResource,
+		SecretResource,
+		NamespaceResource,
+		NodeResource,
 	}
 
-	for resourceName, res := range resources {
-		gvr := gv.WithResource(resourceName)
-		builder := registry.NewResourceBuilder(gvr).
+	for _, res := range resources {
+		builder := registry.NewResourceBuilder(res.GVR()).
 			SingularName(res.SingularName).
 			NamespaceScoped(res.NamespaceScoped).
 			ShortNames(res.ShortNames...).
@@ -44,13 +40,13 @@ func (g *CoreV1Group) RegisterResources(r *registry.ResourceRegistry, factory re
 		if res.StorageWrapper != nil {
 			info, err := builder.Build()
 			if err != nil {
-				return fmt.Errorf("failed to build resource %s: %v", resourceName, err)
+				return fmt.Errorf("failed to build resource %s: %v", res.Resource, err)
 			}
 			info.Storage = res.StorageWrapper(info.Storage)
 		}
 
 		if err := r.Register(builder); err != nil {
-			return fmt.Errorf("failed to register %s: %v", resourceName, err)
+			return fmt.Errorf("failed to register %s: %v", res.Resource, err)
 		}
 	}
 

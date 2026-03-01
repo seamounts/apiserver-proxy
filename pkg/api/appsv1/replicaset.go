@@ -15,6 +15,10 @@ func NewReplicaSetStorage(s registry.Storage) registry.Storage {
 }
 
 var ReplicaSetResource = types.APIResource{
+	Group:           "apps",
+	Version:         "v1",
+	Kind:            "ReplicaSet",
+	Resource:        "replicasets",
 	SingularName:    "replicaset",
 	NamespaceScoped: true,
 	ShortNames:      []string{"rs"},
