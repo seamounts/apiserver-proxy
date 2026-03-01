@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/emicklei/go-restful/v3"
+	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
@@ -51,7 +52,7 @@ func NewContainerServer(cfg *Config) (*ContainerServer, error) {
 		scheme:          scheme,
 		kubeRESTConfig:  kubeRESTConfig,
 		proxyTransport:  proxyTransport,
-		storageRegistry: make(map[schema.GroupVersionResource]Storage),
+		storageRegistry: make(map[schema.GroupVersionResource]registry.Storage),
 		hookRegistry:    NewHookRegistry(),
 		middlewareChain: make([]Middleware, 0),
 	}
@@ -105,7 +106,7 @@ func (s *ContainerServer) installAPIGroup(apiGroupInfo *APIGroupInfo) error {
 	return nil
 }
 
-func (s *ContainerServer) RegisterResource(gvr schema.GroupVersionResource, storage Storage, options *RESTStorageOptions) error {
+func (s *ContainerServer) RegisterResource(gvr schema.GroupVersionResource, storage registry.Storage, options *RESTStorageOptions) error {
 	s.storageRegistry[gvr] = storage
 
 	if options != nil && len(options.CustomVerbs) > 0 {

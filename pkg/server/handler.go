@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/emicklei/go-restful/v3"
+	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,12 +17,12 @@ import (
 type RESTHandler struct {
 	server     *ContainerServer
 	gvr        schema.GroupVersionResource
-	storage    Storage
+	storage    registry.Storage
 	proxy      bool
 	proxyVerbs map[Verb]bool
 }
 
-func NewRESTHandler(server *ContainerServer, gvr schema.GroupVersionResource, storage Storage, proxy bool, proxyVerbs []Verb) *RESTHandler {
+func NewRESTHandler(server *ContainerServer, gvr schema.GroupVersionResource, storage registry.Storage, proxy bool, proxyVerbs []Verb) *RESTHandler {
 	proxyVerbMap := make(map[Verb]bool)
 	for _, v := range proxyVerbs {
 		proxyVerbMap[v] = true
@@ -476,6 +477,8 @@ type simpleUpdatedObjectInfo struct {
 func (i *simpleUpdatedObjectInfo) UpdatedObject(ctx context.Context, oldObj runtime.Object) (runtime.Object, error) {
 	return i.obj, nil
 }
+
+var _ registry.UpdatedObjectInfo = &simpleUpdatedObjectInfo{}
 
 func parseGVRFromPath(path string) schema.GroupVersionResource {
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")

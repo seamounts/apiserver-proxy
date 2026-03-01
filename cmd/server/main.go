@@ -60,20 +60,36 @@ func main() {
 			os.Exit(1)
 		}
 
+		resourceRegistry := registry.NewResourceRegistry()
+
 		storageFactory := registry.NewDefaultStorageFactory(func(gvr schema.GroupVersionResource) registry.Storage {
 			return &dbStorageAdapter{storage.NewDBStorage(db, nil, gvr)}
 		})
 
-		coreBuilder := registry.NewRESTStorageBuilder(schema.GroupVersion{Group: "", Version: "v1"})
-		if err := registry.RegisterCoreResources(coreBuilder, storageFactory); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to register core resources: %v\n", err)
+		if err := resourceRegistry.RegisterFromConfig(storageFactory, registry.AllBuiltinResourcesConfigs()...); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to register builtin resources: %v\n", err)
 			os.Exit(1)
 		}
 
-		appsBuilder := registry.NewRESTStorageBuilder(schema.GroupVersion{Group: "apps", Version: "v1"})
-		if err := registry.RegisterAppsResources(appsBuilder, storageFactory); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to register apps resources: %v\n", err)
+		customGVR := schema.GroupVersionResource{
+			Group:    "example.com",
+			Version:  "v1",
+			Resource: "myresources",
+		}
+		if err := resourceRegistry.Register(
+			registry.NewResourceBuilder(customGVR).
+				SingularName("myresource").
+				NamespaceScoped(true).
+				ShortNames("mr").
+				StorageFactory(storageFactory),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to register custom resource: %v\n", err)
 			os.Exit(1)
+		}
+
+		for _, meta := range resourceRegistry.ListResources() {
+			srv.RegisterResource(meta.GVR, meta.Storage, nil)
+			fmt.Printf("Registered resource: %s\n", meta.GVR)
 		}
 	}
 
