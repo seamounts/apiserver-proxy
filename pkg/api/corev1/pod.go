@@ -255,4 +255,12 @@ var PodResource = types.APIResource{
 	ObjectType:      &corev1.Pod{},
 	ListObjectType:  &corev1.PodList{},
 	StorageWrapper:  NewPodStorage,
+	Subresources: []*types.APISubresource{
+		{
+			Name:       "status",
+			Kind:       "PodStatus",
+			ObjectType: &corev1.Pod{},
+			Verbs:      []string{"get", "update"},
+		},
+	},
 }

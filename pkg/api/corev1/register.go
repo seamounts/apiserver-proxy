@@ -43,6 +43,24 @@ func (g *CoreV1Group) RegisterResources(r *registry.ResourceRegistry, factory re
 				return fmt.Errorf("failed to build resource %s: %v", res.Resource, err)
 			}
 			info.Storage = res.StorageWrapper(info.Storage)
+
+			for _, sr := range res.Subresources {
+				var srStorage registry.SubresourceStorage
+				switch sr.Name {
+				case "status":
+					srStorage = NewPodStatusStorage(info.Storage)
+				default:
+					continue
+				}
+
+				srInfo := &registry.SubresourceInfo{
+					Name:           sr.Name,
+					Storage:        srStorage,
+					Verbs:          sr.Verbs,
+					ParentResource: res.Resource,
+				}
+				builder.Subresource(srInfo)
+			}
 		}
 
 		if err := r.Register(builder); err != nil {

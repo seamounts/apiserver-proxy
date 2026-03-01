@@ -32,6 +32,22 @@ type APIResource struct {
 	ListObjectType runtime.Object
 	// StorageWrapper is an optional function to wrap the storage implementation
 	StorageWrapper func(registry.Storage) registry.Storage
+	// Subresources is a list of subresources for this resource
+	Subresources []*APISubresource
+}
+
+// APISubresource represents a subresource definition.
+type APISubresource struct {
+	// Name is the subresource name (e.g., "status", "scale")
+	Name string
+	// Kind is the subresource kind (e.g., "PodStatus", "Scale")
+	Kind string
+	// ObjectType is the Go type for the subresource object
+	ObjectType runtime.Object
+	// Storage is the subresource storage implementation
+	Storage registry.SubresourceStorage
+	// Verbs are the supported verbs (e.g., "get", "update")
+	Verbs []string
 }
 
 // GVR returns the GroupVersionResource for this API resource.
@@ -50,6 +66,25 @@ func (r *APIResource) GVK() schema.GroupVersionKind {
 		Version: r.Version,
 		Kind:    r.Kind,
 	}
+}
+
+// SubresourceGVR returns the GroupVersionResource for a subresource.
+func (r *APIResource) SubresourceGVR(subresourceName string) schema.GroupVersionResource {
+	return schema.GroupVersionResource{
+		Group:    r.Group,
+		Version:  r.Version,
+		Resource: r.Resource + "/" + subresourceName,
+	}
+}
+
+// GetSubresource returns a subresource by name.
+func (r *APIResource) GetSubresource(name string) *APISubresource {
+	for _, sr := range r.Subresources {
+		if sr.Name == name {
+			return sr
+		}
+	}
+	return nil
 }
 
 // DefaultStorageWrapper is a no-op storage wrapper that returns the storage unchanged.

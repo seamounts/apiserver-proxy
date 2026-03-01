@@ -95,6 +95,8 @@ func main() {
 			srv.RegisterResource(info.GVR, info.Storage, nil)
 			fmt.Printf("Registered resource: %s\n", info.GVR)
 		}
+
+		srv.SetResourceRegistry(resourceRegistry)
 	}
 
 	if *enableAudit {

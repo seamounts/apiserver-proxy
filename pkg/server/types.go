@@ -67,6 +67,7 @@ type ContainerServer struct {
 	kubeRESTConfig  *rest.Config
 	middlewareChain []Middleware
 	storageRegistry map[schema.GroupVersionResource]registry.Storage
+	resourceRegistry *registry.ResourceRegistry
 	hookRegistry    *HookRegistry
 }
 

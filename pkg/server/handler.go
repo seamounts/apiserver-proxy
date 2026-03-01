@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -307,8 +308,79 @@ func (s *ContainerServer) handleDelete(req *restful.Request, resp *restful.Respo
 	resp.WriteEntity(deletedObj)
 }
 
+// handleSubresource handles subresource requests (e.g., pods/status, deployments/scale).
 func (s *ContainerServer) handleSubresource(req *restful.Request, resp *restful.Response) {
-	s.proxyRequest(req, resp)
+	ctx := req.Request.Context()
+	group := req.PathParameter("group")
+	version := req.PathParameter("version")
+	resource := req.PathParameter("resource")
+	name := req.PathParameter("name")
+	subresource := req.PathParameter("subresource")
+
+	gvr := schema.GroupVersionResource{
+		Group:    group,
+		Version:  version,
+		Resource: resource,
+	}
+
+	srInfo, exists := s.resourceRegistry.GetSubresource(gvr, subresource)
+	if !exists {
+		s.proxyRequest(req, resp)
+		return
+	}
+
+	switch req.Request.Method {
+	case http.MethodGet:
+		s.handleSubresourceGet(ctx, req, resp, srInfo, name)
+	case http.MethodPut, http.MethodPatch:
+		s.handleSubresourceUpdate(ctx, req, resp, srInfo, name)
+	default:
+		resp.WriteError(http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed for subresource", req.Request.Method))
+	}
+}
+
+// handleSubresourceGet handles GET requests for subresources.
+func (s *ContainerServer) handleSubresourceGet(ctx context.Context, req *restful.Request, resp *restful.Response, srInfo *registry.SubresourceInfo, name string) {
+	getOptions := &metav1.GetOptions{}
+	if err := req.ReadEntity(getOptions); err != nil {
+		getOptions = &metav1.GetOptions{}
+	}
+
+	result, err := srInfo.Storage.Get(ctx, name, getOptions)
+	if err != nil {
+		resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	resp.WriteEntity(result)
+}
+
+// handleSubresourceUpdate handles PUT/PATCH requests for subresources.
+func (s *ContainerServer) handleSubresourceUpdate(ctx context.Context, req *restful.Request, resp *restful.Response, srInfo *registry.SubresourceInfo, name string) {
+	body, err := io.ReadAll(req.Request.Body)
+	if err != nil {
+		resp.WriteError(http.StatusBadRequest, err)
+		return
+	}
+
+	obj := srInfo.Storage.New()
+	if err := json.Unmarshal(body, obj); err != nil {
+		resp.WriteError(http.StatusBadRequest, err)
+		return
+	}
+
+	updateOptions := &metav1.UpdateOptions{}
+	if err := req.ReadEntity(updateOptions); err != nil {
+		updateOptions = &metav1.UpdateOptions{}
+	}
+
+	result, _, err := srInfo.Storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, updateOptions)
+	if err != nil {
+		resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	resp.WriteEntity(result)
 }
 
 func (s *ContainerServer) handleCoreCreate(req *restful.Request, resp *restful.Response) {

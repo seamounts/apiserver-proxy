@@ -28,14 +28,25 @@ type ResourceInfo struct {
 	ObjectType runtime.Object
 	// ListObjectType is the Go type for the resource list object
 	ListObjectType runtime.Object
+	// Subresources is a map of subresource name to SubresourceInfo
+	Subresources map[string]*SubresourceInfo
+}
+
+// GetSubresource returns a subresource by name.
+func (r *ResourceInfo) GetSubresource(name string) *SubresourceInfo {
+	if r.Subresources == nil {
+		return nil
+	}
+	return r.Subresources[name]
 }
 
 // ResourceBuilder provides a fluent API for building ResourceInfo.
 // It allows setting resource properties in a chainable manner.
 type ResourceBuilder struct {
-	info    *ResourceInfo
-	storage Storage
-	factory StorageFactory
+	info         *ResourceInfo
+	storage      Storage
+	factory      StorageFactory
+	subresources []*SubresourceInfo
 }
 
 // NewResourceBuilder creates a new ResourceBuilder with the given GVR.
@@ -46,7 +57,9 @@ func NewResourceBuilder(gvr schema.GroupVersionResource) *ResourceBuilder {
 			GVR:             gvr,
 			NamespaceScoped: true,
 			Verbs:           []string{"get", "list", "create", "update", "delete"},
+			Subresources:    make(map[string]*SubresourceInfo),
 		},
+		subresources: make([]*SubresourceInfo, 0),
 	}
 }
 
@@ -104,6 +117,12 @@ func (b *ResourceBuilder) ListObjectType(list runtime.Object) *ResourceBuilder {
 	return b
 }
 
+// Subresource adds a subresource to the resource.
+func (b *ResourceBuilder) Subresource(sr *SubresourceInfo) *ResourceBuilder {
+	b.subresources = append(b.subresources, sr)
+	return b
+}
+
 // Build creates the ResourceInfo from the builder configuration.
 // It validates that storage is available and sets defaults for missing fields.
 func (b *ResourceBuilder) Build() (*ResourceInfo, error) {
@@ -129,14 +148,19 @@ func (b *ResourceBuilder) Build() (*ResourceInfo, error) {
 		b.info.ObjectType = &metav1.PartialObjectMetadata{}
 	}
 
+	for _, sr := range b.subresources {
+		b.info.Subresources[sr.Name] = sr
+	}
+
 	return b.info, nil
 }
 
 // ResourceRegistry manages all registered resources.
 // It provides lookup and listing operations for resources and groups.
 type ResourceRegistry struct {
-	resources map[string]*ResourceInfo
-	groups    map[string]*GroupInfo
+	resources    map[string]*ResourceInfo
+	subresources map[string]*SubresourceInfo
+	groups       map[string]*GroupInfo
 }
 
 // GroupInfo contains information about an API group.
@@ -150,8 +174,9 @@ type GroupInfo struct {
 // NewResourceRegistry creates a new empty ResourceRegistry.
 func NewResourceRegistry() *ResourceRegistry {
 	return &ResourceRegistry{
-		resources: make(map[string]*ResourceInfo),
-		groups:    make(map[string]*GroupInfo),
+		resources:    make(map[string]*ResourceInfo),
+		subresources: make(map[string]*SubresourceInfo),
+		groups:       make(map[string]*GroupInfo),
 	}
 }
 
@@ -165,6 +190,11 @@ func (r *ResourceRegistry) Register(builder *ResourceBuilder) error {
 
 	key := gvrKey(info.GVR)
 	r.resources[key] = info
+
+	for _, sr := range info.Subresources {
+		srKey := subresourceKey(info.GVR, sr.Name)
+		r.subresources[srKey] = sr
+	}
 
 	gvKey := info.GVR.GroupVersion().String()
 	if _, exists := r.groups[gvKey]; !exists {
@@ -193,6 +223,13 @@ func (r *ResourceRegistry) GetStorage(gvr schema.GroupVersionResource) (Storage,
 	return info.Storage, true
 }
 
+// GetSubresource retrieves a subresource by parent GVR and subresource name.
+func (r *ResourceRegistry) GetSubresource(gvr schema.GroupVersionResource, subresourceName string) (*SubresourceInfo, bool) {
+	srKey := subresourceKey(gvr, subresourceName)
+	sr, exists := r.subresources[srKey]
+	return sr, exists
+}
+
 // ListResources returns all registered resources.
 func (r *ResourceRegistry) ListResources() []*ResourceInfo {
 	result := make([]*ResourceInfo, 0, len(r.resources))
@@ -214,4 +251,9 @@ func (r *ResourceRegistry) ListGroups() []*GroupInfo {
 // gvrKey creates a unique string key for a GVR.
 func gvrKey(gvr schema.GroupVersionResource) string {
 	return fmt.Sprintf("%s/%s/%s", gvr.Group, gvr.Version, gvr.Resource)
+}
+
+// subresourceKey creates a unique string key for a subresource.
+func subresourceKey(gvr schema.GroupVersionResource, subresourceName string) string {
+	return fmt.Sprintf("%s/%s/%s/%s", gvr.Group, gvr.Version, gvr.Resource, subresourceName)
 }

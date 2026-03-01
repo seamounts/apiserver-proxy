@@ -56,6 +56,7 @@ func NewContainerServer(cfg *Config) (*ContainerServer, error) {
 		kubeRESTConfig:  kubeRESTConfig,
 		proxyTransport:  proxyTransport,
 		storageRegistry: make(map[schema.GroupVersionResource]registry.Storage),
+		resourceRegistry: registry.NewResourceRegistry(),
 		hookRegistry:    NewHookRegistry(),
 		middlewareChain: make([]Middleware, 0),
 	}
@@ -127,6 +128,14 @@ func (s *ContainerServer) RegisterResource(gvr schema.GroupVersionResource, stor
 	}
 
 	return nil
+}
+
+// SetResourceRegistry sets the resource registry for the server.
+func (s *ContainerServer) SetResourceRegistry(rr *registry.ResourceRegistry) {
+	s.resourceRegistry = rr
+	for _, info := range rr.ListResources() {
+		s.storageRegistry[info.GVR] = info.Storage
+	}
 }
 
 // AddMiddleware adds a middleware to the middleware chain.
