@@ -1,3 +1,5 @@
+// Package storage provides database-backed storage implementations for Kubernetes resources.
+// It implements the registry.Storage interface using GORM for database operations.
 package storage
 
 import (
@@ -6,20 +8,25 @@ import (
 	"fmt"
 	"time"
 
+	"gorm.io/gorm"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
-	"gorm.io/gorm"
 )
 
+// ValidateObjectFunc is a function type for validating objects.
 type ValidateObjectFunc func(ctx context.Context, obj runtime.Object) error
+
+// ValidateObjectUpdateFunc is a function type for validating object updates.
 type ValidateObjectUpdateFunc func(ctx context.Context, newObj, oldObj runtime.Object) error
 
+// UpdatedObjectInfo provides information about an updated object.
 type UpdatedObjectInfo interface {
 	UpdatedObject(ctx context.Context, oldObj runtime.Object) (runtime.Object, error)
 }
 
+// simpleUpdatedObjectInfo is a simple implementation of UpdatedObjectInfo.
 type simpleUpdatedObjectInfo struct {
 	obj runtime.Object
 }
@@ -28,29 +35,38 @@ func (i *simpleUpdatedObjectInfo) UpdatedObject(ctx context.Context, oldObj runt
 	return i.obj, nil
 }
 
+// DBConfig holds database connection configuration.
 type DBConfig struct {
-	Driver          string
-	DSN             string
-	MaxOpenConns    int
-	MaxIdleConns    int
+	// Driver is the database driver name
+	Driver string
+	// DSN is the data source name/connection string
+	DSN string
+	// MaxOpenConns is the maximum number of open connections
+	MaxOpenConns int
+	// MaxIdleConns is the maximum number of idle connections
+	MaxIdleConns int
+	// ConnMaxLifetime is the maximum lifetime of connections
 	ConnMaxLifetime time.Duration
 }
 
+// DBStorage implements registry.Storage using a database backend.
+// It stores Kubernetes resources as JSON in a database table.
 type DBStorage struct {
 	db     *gorm.DB
 	scheme *runtime.Scheme
 	gvr    schema.GroupVersionResource
 }
 
+// ResourceRecord is the database model for storing resources.
 type ResourceRecord struct {
-	ID              uint           `gorm:"primaryKey"`
-	Group           string         `gorm:"index:idx_gvr"`
-	Version         string         `gorm:"index:idx_gvr"`
-	Resource        string         `gorm:"index:idx_gvr"`
-	Namespace       string         `gorm:"index:idx_namespace"`
-	Name            string         `gorm:"index:idx_name"`
-	UID             string         `gorm:"uniqueIndex:idx_uid"`
-	RawData         []byte         `gorm:"type:longblob"`
+	ID              uint   `gorm:"primaryKey"`
+	Group           string `gorm:"index:idx_gvr"`
+	Version         string `gorm:"index:idx_gvr"`
+	Resource        string `gorm:"index:idx_gvr"`
+	Namespace       string `gorm:"index:idx_namespace"`
+	Name            string `gorm:"index:idx_name"`
+	UID             string `gorm:"uniqueIndex:idx_uid"`
+	RawData         []byte `gorm:"type:longblob"`
 	ResourceVersion string
 	Labels          string
 	Annotations     string
@@ -59,10 +75,12 @@ type ResourceRecord struct {
 	DeletedAt       gorm.DeletedAt `gorm:"index"`
 }
 
+// TableName returns the table name for ResourceRecord.
 func (ResourceRecord) TableName() string {
 	return "container_resources"
 }
 
+// NewDBStorage creates a new DBStorage instance.
 func NewDBStorage(db *gorm.DB, scheme *runtime.Scheme, gvr schema.GroupVersionResource) *DBStorage {
 	return &DBStorage{
 		db:     db,
@@ -71,14 +89,17 @@ func NewDBStorage(db *gorm.DB, scheme *runtime.Scheme, gvr schema.GroupVersionRe
 	}
 }
 
+// Init initializes the database schema.
 func (s *DBStorage) Init() error {
 	return s.db.AutoMigrate(&ResourceRecord{})
 }
 
+// New returns a new empty object.
 func (s *DBStorage) New() runtime.Object {
 	return &metav1.PartialObjectMetadata{}
 }
 
+// getObjectName extracts the name from an object.
 func getObjectName(obj runtime.Object) string {
 	if meta, ok := obj.(metav1.Object); ok {
 		return meta.GetName()
@@ -86,6 +107,7 @@ func getObjectName(obj runtime.Object) string {
 	return ""
 }
 
+// getObjectNamespace extracts the namespace from an object.
 func getObjectNamespace(obj runtime.Object) string {
 	if meta, ok := obj.(metav1.Object); ok {
 		return meta.GetNamespace()
@@ -93,6 +115,7 @@ func getObjectNamespace(obj runtime.Object) string {
 	return ""
 }
 
+// getObjectUID extracts the UID from an object.
 func getObjectUID(obj runtime.Object) string {
 	if meta, ok := obj.(metav1.Object); ok {
 		return string(meta.GetUID())
@@ -100,6 +123,7 @@ func getObjectUID(obj runtime.Object) string {
 	return ""
 }
 
+// getObjectResourceVersion extracts the resource version from an object.
 func getObjectResourceVersion(obj runtime.Object) string {
 	if meta, ok := obj.(metav1.Object); ok {
 		return meta.GetResourceVersion()
@@ -107,6 +131,7 @@ func getObjectResourceVersion(obj runtime.Object) string {
 	return ""
 }
 
+// getObjectLabels extracts the labels from an object.
 func getObjectLabels(obj runtime.Object) map[string]string {
 	if meta, ok := obj.(metav1.Object); ok {
 		return meta.GetLabels()
@@ -114,6 +139,7 @@ func getObjectLabels(obj runtime.Object) map[string]string {
 	return nil
 }
 
+// getObjectAnnotations extracts the annotations from an object.
 func getObjectAnnotations(obj runtime.Object) map[string]string {
 	if meta, ok := obj.(metav1.Object); ok {
 		return meta.GetAnnotations()
@@ -121,6 +147,7 @@ func getObjectAnnotations(obj runtime.Object) map[string]string {
 	return nil
 }
 
+// Create stores a new resource in the database.
 func (s *DBStorage) Create(ctx context.Context, obj runtime.Object, createValidation ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
 	if createValidation != nil {
 		if err := createValidation(ctx, obj); err != nil {
@@ -156,6 +183,7 @@ func (s *DBStorage) Create(ctx context.Context, obj runtime.Object, createValida
 	return obj, nil
 }
 
+// Get retrieves a resource by name from the database.
 func (s *DBStorage) Get(ctx context.Context, name string, options *metav1.GetOptions) (runtime.Object, error) {
 	var record ResourceRecord
 	query := s.db.WithContext(ctx).Where("group = ? AND version = ? AND resource = ? AND name = ?",
@@ -180,6 +208,7 @@ func (s *DBStorage) Get(ctx context.Context, name string, options *metav1.GetOpt
 	return obj, nil
 }
 
+// List retrieves a list of resources from the database.
 func (s *DBStorage) List(ctx context.Context, options *metav1.ListOptions) (runtime.Object, error) {
 	var records []ResourceRecord
 	query := s.db.WithContext(ctx).Where("group = ? AND version = ? AND resource = ?",
@@ -213,6 +242,7 @@ func (s *DBStorage) List(ctx context.Context, options *metav1.ListOptions) (runt
 	}, nil
 }
 
+// Update updates an existing resource in the database.
 func (s *DBStorage) Update(ctx context.Context, name string, objInfo UpdatedObjectInfo, createValidation ValidateObjectFunc, updateValidation ValidateObjectUpdateFunc, forceAllowCreate bool, options *metav1.UpdateOptions) (runtime.Object, bool, error) {
 	var record ResourceRecord
 	if err := s.db.WithContext(ctx).Where("group = ? AND version = ? AND resource = ? AND name = ?",
@@ -264,6 +294,7 @@ func (s *DBStorage) Update(ctx context.Context, name string, objInfo UpdatedObje
 	return newObj, false, nil
 }
 
+// Delete removes a resource from the database.
 func (s *DBStorage) Delete(ctx context.Context, name string, deleteValidation ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
 	var record ResourceRecord
 	if err := s.db.WithContext(ctx).Where("group = ? AND version = ? AND resource = ? AND name = ?",
@@ -289,6 +320,7 @@ func (s *DBStorage) Delete(ctx context.Context, name string, deleteValidation Va
 	return obj, true, nil
 }
 
+// DeleteCollection removes multiple resources from the database.
 func (s *DBStorage) DeleteCollection(ctx context.Context, deleteValidation ValidateObjectFunc, options *metav1.DeleteOptions, listOptions *metav1.ListOptions) (runtime.Object, error) {
 	list, err := s.List(ctx, listOptions)
 	if err != nil {
@@ -306,6 +338,7 @@ func (s *DBStorage) DeleteCollection(ctx context.Context, deleteValidation Valid
 	return list, nil
 }
 
+// Watch is not supported for database storage.
 func (s *DBStorage) Watch(ctx context.Context, options *metav1.ListOptions) (watch.Interface, error) {
 	return nil, fmt.Errorf("watch not supported for database storage")
 }

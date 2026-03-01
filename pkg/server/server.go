@@ -14,6 +14,7 @@ import (
 	"k8s.io/client-go/transport"
 )
 
+// NewConfig creates a new Config with default values.
 func NewConfig() *Config {
 	return &Config{
 		SecurePort:      6443,
@@ -34,6 +35,8 @@ func NewConfig() *Config {
 	}
 }
 
+// NewContainerServer creates a new ContainerServer instance.
+// It initializes the runtime scheme, Kubernetes REST config, and proxy transport.
 func NewContainerServer(cfg *Config) (*ContainerServer, error) {
 	scheme := runtime.NewScheme()
 
@@ -60,6 +63,7 @@ func NewContainerServer(cfg *Config) (*ContainerServer, error) {
 	return s, nil
 }
 
+// buildKubeRESTConfig builds the Kubernetes REST configuration.
 func buildKubeRESTConfig(cfg *Config) (*rest.Config, error) {
 	if cfg.KubeConfig != "" {
 		return rest.InClusterConfig()
@@ -73,6 +77,7 @@ func buildKubeRESTConfig(cfg *Config) (*rest.Config, error) {
 	}, nil
 }
 
+// buildProxyTransport builds the HTTP transport for proxying requests.
 func buildProxyTransport(cfg *rest.Config) (http.RoundTripper, error) {
 	transportConfig, err := cfg.TransportConfig()
 	if err != nil {
@@ -82,6 +87,7 @@ func buildProxyTransport(cfg *rest.Config) (http.RoundTripper, error) {
 	return transport.New(transportConfig)
 }
 
+// InstallAPIGroups installs multiple API groups.
 func (s *ContainerServer) InstallAPIGroups(apiGroupInfos ...*APIGroupInfo) error {
 	for _, apiGroupInfo := range apiGroupInfos {
 		if err := s.installAPIGroup(apiGroupInfo); err != nil {
@@ -91,6 +97,7 @@ func (s *ContainerServer) InstallAPIGroups(apiGroupInfos ...*APIGroupInfo) error
 	return nil
 }
 
+// installAPIGroup installs a single API group.
 func (s *ContainerServer) installAPIGroup(apiGroupInfo *APIGroupInfo) error {
 	for version, storageMap := range apiGroupInfo.VersionedResourcesStorageMap {
 		for resource, storage := range storageMap {
@@ -106,6 +113,8 @@ func (s *ContainerServer) installAPIGroup(apiGroupInfo *APIGroupInfo) error {
 	return nil
 }
 
+// RegisterResource registers a resource with its storage implementation.
+// Options can be provided to enable proxying and custom verbs.
 func (s *ContainerServer) RegisterResource(gvr schema.GroupVersionResource, storage registry.Storage, options *RESTStorageOptions) error {
 	s.storageRegistry[gvr] = storage
 
@@ -120,10 +129,12 @@ func (s *ContainerServer) RegisterResource(gvr schema.GroupVersionResource, stor
 	return nil
 }
 
+// AddMiddleware adds a middleware to the middleware chain.
 func (s *ContainerServer) AddMiddleware(middleware Middleware) {
 	s.middlewareChain = append(s.middlewareChain, middleware)
 }
 
+// AddHook registers a hook function for the specified hook type.
 func (s *ContainerServer) AddHook(hookType HookType, hook HookFunc) {
 	switch hookType {
 	case PreCreateHook:
@@ -149,6 +160,7 @@ func (s *ContainerServer) AddHook(hookType HookType, hook HookFunc) {
 	}
 }
 
+// Run starts the HTTP server and blocks until the context is cancelled.
 func (s *ContainerServer) Run(ctx context.Context) error {
 	restContainer := s.setupRoutes()
 
@@ -172,6 +184,7 @@ func (s *ContainerServer) Run(ctx context.Context) error {
 	}
 }
 
+// setupRoutes configures the REST routes for the server.
 func (s *ContainerServer) setupRoutes() *restful.Container {
 	restContainer := restful.NewContainer()
 	restContainer.Router(restful.CurlyRouter{})
@@ -209,6 +222,7 @@ func (s *ContainerServer) setupRoutes() *restful.Container {
 	return restContainer
 }
 
+// NewHookRegistry creates a new HookRegistry with empty hook slices.
 func NewHookRegistry() *HookRegistry {
 	return &HookRegistry{
 		preCreateHooks:  make([]HookFunc, 0),
@@ -224,6 +238,7 @@ func NewHookRegistry() *HookRegistry {
 	}
 }
 
+// ExecutePreCreateHooks executes all pre-create hooks.
 func (h *HookRegistry) ExecutePreCreateHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.preCreateHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -233,6 +248,7 @@ func (h *HookRegistry) ExecutePreCreateHooks(ctx context.Context, gvr schema.Gro
 	return nil
 }
 
+// ExecutePostCreateHooks executes all post-create hooks.
 func (h *HookRegistry) ExecutePostCreateHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.postCreateHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -242,6 +258,7 @@ func (h *HookRegistry) ExecutePostCreateHooks(ctx context.Context, gvr schema.Gr
 	return nil
 }
 
+// ExecutePreUpdateHooks executes all pre-update hooks.
 func (h *HookRegistry) ExecutePreUpdateHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.preUpdateHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -251,6 +268,7 @@ func (h *HookRegistry) ExecutePreUpdateHooks(ctx context.Context, gvr schema.Gro
 	return nil
 }
 
+// ExecutePostUpdateHooks executes all post-update hooks.
 func (h *HookRegistry) ExecutePostUpdateHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.postUpdateHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -260,6 +278,7 @@ func (h *HookRegistry) ExecutePostUpdateHooks(ctx context.Context, gvr schema.Gr
 	return nil
 }
 
+// ExecutePreDeleteHooks executes all pre-delete hooks.
 func (h *HookRegistry) ExecutePreDeleteHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.preDeleteHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -269,6 +288,7 @@ func (h *HookRegistry) ExecutePreDeleteHooks(ctx context.Context, gvr schema.Gro
 	return nil
 }
 
+// ExecutePostDeleteHooks executes all post-delete hooks.
 func (h *HookRegistry) ExecutePostDeleteHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.postDeleteHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -278,6 +298,7 @@ func (h *HookRegistry) ExecutePostDeleteHooks(ctx context.Context, gvr schema.Gr
 	return nil
 }
 
+// ExecutePreGetHooks executes all pre-get hooks.
 func (h *HookRegistry) ExecutePreGetHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.preGetHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -287,6 +308,7 @@ func (h *HookRegistry) ExecutePreGetHooks(ctx context.Context, gvr schema.GroupV
 	return nil
 }
 
+// ExecutePostGetHooks executes all post-get hooks.
 func (h *HookRegistry) ExecutePostGetHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.postGetHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -296,6 +318,7 @@ func (h *HookRegistry) ExecutePostGetHooks(ctx context.Context, gvr schema.Group
 	return nil
 }
 
+// ExecutePreListHooks executes all pre-list hooks.
 func (h *HookRegistry) ExecutePreListHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.preListHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
@@ -305,6 +328,7 @@ func (h *HookRegistry) ExecutePreListHooks(ctx context.Context, gvr schema.Group
 	return nil
 }
 
+// ExecutePostListHooks executes all post-list hooks.
 func (h *HookRegistry) ExecutePostListHooks(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {
 	for _, hook := range h.postListHooks {
 		if err := hook(ctx, gvr, obj); err != nil {
