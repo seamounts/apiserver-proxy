@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -58,7 +59,7 @@ func (s *ContainerServer) handleResourceCreate(req *restful.Request, resp *restf
 		return
 	}
 
-	createOptions := &metav1.CreateOptions{}
+	createOptions := readCreateOptions(req.Request)
 	result, err := info.Storage.Create(ctx, obj, nil, createOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
@@ -78,11 +79,7 @@ func (s *ContainerServer) handleResourceGet(req *restful.Request, resp *restful.
 	ctx := req.Request.Context()
 	name := req.PathParameter("name")
 
-	getOptions := &metav1.GetOptions{}
-	if err := req.ReadEntity(getOptions); err != nil {
-		getOptions = &metav1.GetOptions{}
-	}
-
+	getOptions := readGetOptions(req.Request)
 	result, err := info.Storage.Get(ctx, name, getOptions)
 	if err != nil {
 		resp.WriteError(http.StatusNotFound, err)
@@ -118,7 +115,7 @@ func (s *ContainerServer) handleResourceUpdate(req *restful.Request, resp *restf
 		return
 	}
 
-	updateOptions := &metav1.UpdateOptions{}
+	updateOptions := readUpdateOptions(req.Request)
 	result, _, err := info.Storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, false, updateOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
@@ -154,7 +151,7 @@ func (s *ContainerServer) handleResourceDelete(req *restful.Request, resp *restf
 		return
 	}
 
-	deleteOptions := &metav1.DeleteOptions{}
+	deleteOptions := readDeleteOptions(req.Request)
 	deletedObj, _, err := info.Storage.Delete(ctx, name, nil, deleteOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
@@ -173,8 +170,8 @@ func (s *ContainerServer) handleResourceDelete(req *restful.Request, resp *restf
 func (s *ContainerServer) handleResourceDeleteCollection(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	ctx := req.Request.Context()
 
-	deleteOptions := &metav1.DeleteOptions{}
-	listOptions := &metav1.ListOptions{}
+	deleteOptions := readDeleteOptions(req.Request)
+	listOptions := readListOptions(req.Request)
 
 	result, err := info.Storage.DeleteCollection(ctx, nil, deleteOptions, listOptions)
 	if err != nil {
@@ -195,7 +192,7 @@ func (s *ContainerServer) handleSubresourceGet(req *restful.Request, resp *restf
 	ctx := req.Request.Context()
 	name := req.PathParameter("name")
 
-	getOptions := &metav1.GetOptions{}
+	getOptions := readGetOptions(req.Request)
 	result, err := sr.Storage.Get(ctx, name, getOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
@@ -216,7 +213,7 @@ func (s *ContainerServer) handleSubresourceUpdate(req *restful.Request, resp *re
 		return
 	}
 
-	updateOptions := &metav1.UpdateOptions{}
+	updateOptions := readUpdateOptions(req.Request)
 	result, _, err := sr.Storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, updateOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
@@ -261,4 +258,144 @@ func parseGVRFromPath(path string) schema.GroupVersionResource {
 		}
 	}
 	return schema.GroupVersionResource{}
+}
+
+// readCreateOptions reads CreateOptions from the HTTP request.
+func readCreateOptions(req *http.Request) *metav1.CreateOptions {
+	opts := &metav1.CreateOptions{}
+	query := req.URL.Query()
+
+	if dryRun := query["dryRun"]; len(dryRun) > 0 {
+		opts.DryRun = dryRun
+	}
+	if fieldManager := query.Get("fieldManager"); fieldManager != "" {
+		opts.FieldManager = fieldManager
+	}
+	if fieldValidation := query.Get("fieldValidation"); fieldValidation != "" {
+		opts.FieldValidation = fieldValidation
+	}
+
+	return opts
+}
+
+// readUpdateOptions reads UpdateOptions from the HTTP request.
+func readUpdateOptions(req *http.Request) *metav1.UpdateOptions {
+	opts := &metav1.UpdateOptions{}
+	query := req.URL.Query()
+
+	if dryRun := query["dryRun"]; len(dryRun) > 0 {
+		opts.DryRun = dryRun
+	}
+	if fieldManager := query.Get("fieldManager"); fieldManager != "" {
+		opts.FieldManager = fieldManager
+	}
+	if fieldValidation := query.Get("fieldValidation"); fieldValidation != "" {
+		opts.FieldValidation = fieldValidation
+	}
+
+	return opts
+}
+
+// readDeleteOptions reads DeleteOptions from the HTTP request.
+func readDeleteOptions(req *http.Request) *metav1.DeleteOptions {
+	opts := &metav1.DeleteOptions{}
+	query := req.URL.Query()
+
+	if dryRun := query["dryRun"]; len(dryRun) > 0 {
+		opts.DryRun = dryRun
+	}
+	if gracePeriodSeconds := query.Get("gracePeriodSeconds"); gracePeriodSeconds != "" {
+		if secs, err := parseInt64(gracePeriodSeconds); err == nil {
+			opts.GracePeriodSeconds = &secs
+		}
+	}
+	if propagationPolicy := query.Get("propagationPolicy"); propagationPolicy != "" {
+		policy := metav1.DeletionPropagation(propagationPolicy)
+		opts.PropagationPolicy = &policy
+	}
+	if orphanDependents := query.Get("orphanDependents"); orphanDependents != "" {
+		if val, err := parseBool(orphanDependents); err == nil {
+			opts.OrphanDependents = &val
+		}
+	}
+
+	return opts
+}
+
+// readGetOptions reads GetOptions from the HTTP request.
+func readGetOptions(req *http.Request) *metav1.GetOptions {
+	opts := &metav1.GetOptions{}
+	query := req.URL.Query()
+
+	if resourceVersion := query.Get("resourceVersion"); resourceVersion != "" {
+		opts.ResourceVersion = resourceVersion
+	}
+
+	return opts
+}
+
+// readListOptions reads ListOptions from the HTTP request.
+func readListOptions(req *http.Request) *metav1.ListOptions {
+	opts := &metav1.ListOptions{}
+	query := req.URL.Query()
+
+	if labelSelector := query.Get("labelSelector"); labelSelector != "" {
+		opts.LabelSelector = labelSelector
+	}
+	if fieldSelector := query.Get("fieldSelector"); fieldSelector != "" {
+		opts.FieldSelector = fieldSelector
+	}
+	if watch := query.Get("watch"); watch != "" {
+		if val, err := parseBool(watch); err == nil {
+			opts.Watch = val
+		}
+	}
+	if allowWatchBookmarks := query.Get("allowWatchBookmarks"); allowWatchBookmarks != "" {
+		if val, err := parseBool(allowWatchBookmarks); err == nil {
+			opts.AllowWatchBookmarks = val
+		}
+	}
+	if resourceVersion := query.Get("resourceVersion"); resourceVersion != "" {
+		opts.ResourceVersion = resourceVersion
+	}
+	if resourceVersionMatch := query.Get("resourceVersionMatch"); resourceVersionMatch != "" {
+		opts.ResourceVersionMatch = metav1.ResourceVersionMatch(resourceVersionMatch)
+	}
+	if timeoutSeconds := query.Get("timeoutSeconds"); timeoutSeconds != "" {
+		if secs, err := parseInt64(timeoutSeconds); err == nil {
+			opts.TimeoutSeconds = &secs
+		}
+	}
+	if limit := query.Get("limit"); limit != "" {
+		if val, err := parseInt64(limit); err == nil {
+			opts.Limit = val
+		}
+	}
+	if continueToken := query.Get("continue"); continueToken != "" {
+		opts.Continue = continueToken
+	}
+
+	return opts
+}
+
+func parseInt64(s string) (int64, error) {
+	var result int64
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid int64: %s", s)
+		}
+		result = result*10 + int64(c-'0')
+	}
+	return result, nil
+}
+
+func parseBool(s string) (bool, error) {
+	switch strings.ToLower(s) {
+	case "true", "1":
+		return true, nil
+	case "false", "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid bool: %s", s)
+	}
 }

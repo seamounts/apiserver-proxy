@@ -11,6 +11,7 @@ Container Server 是一个轻量级的容器服务 API 网关，参考 kube-apis
 - **中间件系统**：支持审计、监控、日志等可插拔中间件
 - **智能代理**：自定义 handler 处理注册资源，未注册资源代理到 kube-apiserver
 - **数据持久化**：资源对象可存储到数据库
+- **子资源支持**：支持 status、scale 等子资源操作
 
 ### 1.2 设计原则
 
@@ -18,6 +19,7 @@ Container Server 是一个轻量级的容器服务 API 网关，参考 kube-apis
 2. **可扩展性**：通过中间件和 Hook 机制支持功能扩展
 3. **兼容性**：保持与 K8s API 语义兼容
 4. **模块化**：API 资源按 Group/Version 分层组织，每个资源独立文件
+5. **自动路由**：基于注册资源自动生成 go-restful 路由
 
 ---
 
@@ -41,8 +43,10 @@ Container Server 是一个轻量级的容器服务 API 网关，参考 kube-apis
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                      │                                   │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                        Router (go-restful)                        │   │
-│  │    /api/v1/{resource}          /apis/{group}/{version}/{resource} │   │
+│  │                   Router (go-restful)                             │   │
+│  │         基于 APIGroupInstaller 自动生成路由                        │   │
+│  │    /api/v1/namespaces/{ns}/{resource}                             │   │
+│  │    /apis/{group}/{version}/namespaces/{ns}/{resource}             │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                                      │                                   │
 │  ┌───────────────────────┐    ┌───────────────────────┐                │
@@ -75,10 +79,11 @@ d:\Workspace\code\apiserver\
 │   ├── api/                     # API 资源注册层
 │   │   ├── api.go              # APIManager 统一注册入口
 │   │   ├── types/
-│   │   │   └── types.go        # APIResource 通用结构体
+│   │   │   └── types.go        # APIResource, APISubresource 结构体
 │   │   ├── corev1/             # Core API Group
 │   │   │   ├── register.go     # CoreV1Group 注册入口
 │   │   │   ├── pod.go          # Pod 资源存储实现
+│   │   │   ├── pod_status.go   # Pod status 子资源
 │   │   │   ├── service.go      # Service 资源存储实现
 │   │   │   ├── configmap.go    # ConfigMap 资源存储实现
 │   │   │   ├── secret.go       # Secret 资源存储实现
@@ -93,7 +98,8 @@ d:\Workspace\code\apiserver\
 │   │       └── job.go          # Job 资源存储实现
 │   ├── registry/               # 资源注册核心
 │   │   ├── storage.go          # Storage 接口定义
-│   │   └── registry.go         # ResourceRegistry, ResourceBuilder
+│   │   ├── registry.go         # ResourceRegistry, ResourceBuilder
+│   │   └── subresource.go      # SubresourceStorage 接口
 │   ├── server/                 # 核心服务层
 │   │   ├── types.go            # 类型定义
 │   │   ├── server.go           # 服务初始化和运行
@@ -107,7 +113,7 @@ d:\Workspace\code\apiserver\
 │   │   ├── metrics.go          # Prometheus 监控
 │   │   └── logging.go          # 日志中间件
 │   └── router/                 # 路由层
-│       └── router.go           # 路由解析
+│       └── router.go           # APIGroupInstaller, Router, Handlers
 ├── docs/
 │   └── ARCHITECTURE.md         # 架构设计文档
 ├── go.mod
@@ -135,13 +141,27 @@ type APIResource struct {
     ObjectType      runtime.Object
     ListObjectType  runtime.Object
     StorageWrapper  func(registry.Storage) registry.Storage
+    Subresources    []*APISubresource  // 子资源列表
 }
 
 func (r *APIResource) GVR() schema.GroupVersionResource
 func (r *APIResource) GVK() schema.GroupVersionKind
+func (r *APIResource) SubresourceGVR(subresourceName string) schema.GroupVersionResource
 ```
 
-#### 3.1.2 APIManager 统一注册入口
+#### 3.1.2 APISubresource 结构体
+
+```go
+type APISubresource struct {
+    Name       string              // 子资源名称 (e.g., "status", "scale")
+    Kind       string              // 子资源 Kind
+    ObjectType runtime.Object      // 对象类型
+    Storage    SubresourceStorage  // 存储实现
+    Verbs      []string            // 支持的操作
+}
+```
+
+#### 3.1.3 APIManager 统一注册入口
 
 ```go
 type APIManager struct {
@@ -157,7 +177,7 @@ func DefaultAPIManager() *APIManager {
 }
 ```
 
-#### 3.1.3 资源注册示例
+#### 3.1.4 资源注册示例
 
 ```go
 // pkg/api/corev1/pod.go
@@ -173,19 +193,14 @@ var PodResource = types.APIResource{
     ObjectType:      &corev1.Pod{},
     ListObjectType:  &corev1.PodList{},
     StorageWrapper:  NewPodStorage,
-}
-
-// pkg/api/corev1/register.go
-func (g *CoreV1Group) RegisterResources(r *registry.ResourceRegistry, factory registry.StorageFactory) error {
-    resources := []types.APIResource{
-        PodResource,
-        ServiceResource,
-        ConfigMapResource,
-        SecretResource,
-        NamespaceResource,
-        NodeResource,
-    }
-    // ...
+    Subresources: []*types.APISubresource{
+        {
+            Name:       "status",
+            Kind:       "PodStatus",
+            ObjectType: &corev1.Pod{},
+            Verbs:      []string{"get", "update"},
+        },
+    },
 }
 ```
 
@@ -206,81 +221,145 @@ type Storage interface {
 }
 ```
 
-#### 3.2.2 ResourceBuilder
+#### 3.2.2 SubresourceStorage 接口
 
 ```go
-builder := registry.NewResourceBuilder(gvr).
-    SingularName("pod").
-    NamespaceScoped(true).
-    ShortNames("po").
-    Categories("all").
-    ObjectType(&corev1.Pod{}).
-    ListObjectType(&corev1.PodList{}).
-    StorageFactory(factory)
+type SubresourceStorage interface {
+    New() runtime.Object
+    Get(ctx context.Context, parentName string, options *metav1.GetOptions) (runtime.Object, error)
+    Update(ctx context.Context, parentName string, objInfo UpdatedObjectInfo, ...) (runtime.Object, bool, error)
+}
+
+// 专用接口
+type StatusSubresourceStorage interface { ... }  // status 子资源
+type ScaleSubresourceStorage interface { ... }   // scale 子资源
+type LogSubresourceStorage interface { ... }     // log 子资源 (只读)
 ```
 
 #### 3.2.3 ResourceRegistry
 
 ```go
 type ResourceRegistry struct {
-    resources map[string]*ResourceInfo
-    groups    map[string]*GroupInfo
+    resources    map[string]*ResourceInfo
+    subresources map[string]*SubresourceInfo
+    groups       map[string]*GroupInfo
 }
 
 func (r *ResourceRegistry) Register(builder *ResourceBuilder) error
 func (r *ResourceRegistry) Get(gvr schema.GroupVersionResource) (*ResourceInfo, bool)
 func (r *ResourceRegistry) GetStorage(gvr schema.GroupVersionResource) (Storage, bool)
+func (r *ResourceRegistry) GetSubresource(gvr schema.GroupVersionResource, subresourceName string) (*SubresourceInfo, bool)
 func (r *ResourceRegistry) ListResources() []*ResourceInfo
 func (r *ResourceRegistry) ListGroups() []*GroupInfo
 ```
 
-### 3.3 服务核心 (pkg/server)
+### 3.3 路由系统 (pkg/router)
 
-#### 3.3.1 ContainerServer
+#### 3.3.1 Handlers 接口
+
+```go
+type HandlerFunc func(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo)
+type SubresourceHandlerFunc func(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo, sr *registry.SubresourceInfo)
+
+type Handlers struct {
+    List              HandlerFunc
+    Create            HandlerFunc
+    Get               HandlerFunc
+    Update            HandlerFunc
+    Patch             HandlerFunc
+    Delete            HandlerFunc
+    DeleteCollection  HandlerFunc
+    Watch             HandlerFunc
+    SubresourceGet    SubresourceHandlerFunc
+    SubresourceUpdate SubresourceHandlerFunc
+    SubresourcePatch  SubresourceHandlerFunc
+}
+```
+
+#### 3.3.2 APIGroupInstaller
+
+```go
+type APIGroupInstaller struct {
+    groupName    string
+    groupVersion schema.GroupVersion
+    registry     *registry.ResourceRegistry
+    handlers     *Handlers
+}
+
+func (i *APIGroupInstaller) Install() *restful.WebService
+```
+
+#### 3.3.3 Router
+
+```go
+type Router struct {
+    registry *registry.ResourceRegistry
+    handlers *Handlers
+}
+
+func (r *Router) InstallAll() []*restful.WebService
+func InstallAPIGroupsHandler(reg *registry.ResourceRegistry) *restful.WebService
+```
+
+### 3.4 服务核心 (pkg/server)
+
+#### 3.4.1 ContainerServer
 
 ```go
 type ContainerServer struct {
-    config          *Config
-    scheme          *runtime.Scheme
-    proxyTransport  http.RoundTripper
-    kubeRESTConfig  *rest.Config
-    middlewareChain []Middleware
-    storageRegistry map[schema.GroupVersionResource]Storage
-    hookRegistry    *HookRegistry
+    config           *Config
+    scheme           *runtime.Scheme
+    proxyTransport   http.RoundTripper
+    kubeRESTConfig   *rest.Config
+    middlewareChain  []Middleware
+    storageRegistry  map[schema.GroupVersionResource]Storage
+    resourceRegistry *registry.ResourceRegistry
+    hookRegistry     *HookRegistry
 }
 ```
 
-#### 3.3.2 配置结构
+#### 3.4.2 setupRoutes 自动路由生成
 
 ```go
-type Config struct {
-    EtcdServers      []string
-    KubeAPIServerURL string
-    KubeConfig       string
-    SecurePort       int
-    InsecurePort     int
-    EnableProfiling  bool
-    EnableMetrics    bool
-    DBConfig         *DatabaseConfig
-    MiddlewareConfig *MiddlewareConfig
+func (s *ContainerServer) setupRoutes() *restful.Container {
+    handlers := &router.Handlers{
+        List:              s.handleResourceList,
+        Create:            s.handleResourceCreate,
+        Get:               s.handleResourceGet,
+        Update:            s.handleResourceUpdate,
+        Patch:             s.handleResourcePatch,
+        Delete:            s.handleResourceDelete,
+        DeleteCollection:  s.handleResourceDeleteCollection,
+        Watch:             s.handleResourceWatch,
+        SubresourceGet:    s.handleSubresourceGet,
+        SubresourceUpdate: s.handleSubresourceUpdate,
+        SubresourcePatch:  s.handleSubresourcePatch,
+    }
+
+    r := router.NewRouter(s.resourceRegistry, handlers)
+    webServices := r.InstallAll()
+    // ...
 }
 ```
 
-### 3.4 请求处理 (pkg/server/handler.go)
-
-#### 3.4.1 请求处理流程
+### 3.5 请求处理流程
 
 ```
 HTTP Request
      │
      ▼
 ┌─────────────────┐
-│  Parse GVR      │  解析 Group/Version/Resource
+│ Middleware Chain│  审计、监控、日志
 └─────────────────┘
      │
      ▼
 ┌─────────────────┐
-│ Lookup Storage  │  查找资源存储
+│ go-restful Route│  自动生成的路由匹配
+└─────────────────┘
+     │
+     ▼
+┌─────────────────┐
+│ Lookup Storage  │  从 ResourceRegistry 查找
 └─────────────────┘
      │
      ├─── Found ──────────────────────┐
@@ -297,82 +376,44 @@ HTTP Request
 └─────────────────┘          └─────────────────┘
      │
      ▼
-┌─────────────────┐
-│ Execute Hooks   │
-└─────────────────┘
-     │
-     ▼
 HTTP Response
 ```
 
-#### 3.4.2 路由设计
+### 3.6 自动生成的路由
 
-| 路径模式 | 说明 | 处理方式 |
-|---------|------|---------|
-| `/api/v1/{resource}` | Core API (pods, services 等) | 自定义 handler 或 proxy |
-| `/api/v1/{resource}/{name}` | 具名资源 | 自定义 handler 或 proxy |
-| `/apis/{group}/{version}/{resource}` | Group API (apps/v1/deployments) | 自定义 handler 或 proxy |
-| `/apis/{group}/{version}/{resource}/{name}` | 具名 Group 资源 | 自定义 handler 或 proxy |
+#### 3.6.1 命名空间资源路由
 
-### 3.5 代理机制 (pkg/server/proxy.go)
-
-#### 3.5.1 代理判断逻辑
-
-```go
-func (s *ContainerServer) ShouldProxy(gvr schema.GroupVersionResource, verb Verb) bool {
-    _, registered := s.storageRegistry[gvr]
-    if !registered {
-        return true  // 未注册资源代理到 kube-apiserver
-    }
-    return false
-}
+```
+GET    /api/v1/namespaces/{namespace}/pods
+POST   /api/v1/namespaces/{namespace}/pods
+GET    /api/v1/namespaces/{namespace}/pods/{name}
+PUT    /api/v1/namespaces/{namespace}/pods/{name}
+DELETE /api/v1/namespaces/{namespace}/pods/{name}
+GET    /api/v1/namespaces/{namespace}/pods/{name}/status
+PUT    /api/v1/namespaces/{namespace}/pods/{name}/status
 ```
 
-### 3.6 数据库存储 (pkg/storage/db_storage.go)
+#### 3.6.2 集群资源路由
 
-#### 3.6.1 数据模型
-
-```go
-type ResourceRecord struct {
-    ID              uint           `gorm:"primaryKey"`
-    Group           string         `gorm:"index:idx_gvr"`
-    Version         string         `gorm:"index:idx_gvr"`
-    Resource        string         `gorm:"index:idx_gvr"`
-    Namespace       string         `gorm:"index:idx_namespace"`
-    Name            string         `gorm:"index:idx_name"`
-    UID             string         `gorm:"uniqueIndex:idx_uid"`
-    RawData         []byte         `gorm:"type:longblob"`
-    ResourceVersion string
-    Labels          string
-    Annotations     string
-    CreatedAt       time.Time
-    UpdatedAt       time.Time
-    DeletedAt       gorm.DeletedAt `gorm:"index"`
-}
+```
+GET    /api/v1/nodes
+POST   /api/v1/nodes
+GET    /api/v1/nodes/{name}
+PUT    /api/v1/nodes/{name}
+DELETE /api/v1/nodes/{name}
 ```
 
-### 3.7 中间件系统 (pkg/middleware)
+#### 3.6.3 Group API 路由
 
-#### 3.7.1 中间件接口
-
-```go
-type Middleware interface {
-    Name() string
-    Handler(next http.Handler) http.Handler
-}
+```
+GET    /apis/apps/v1/namespaces/{namespace}/deployments
+POST   /apis/apps/v1/namespaces/{namespace}/deployments
+GET    /apis/apps/v1/namespaces/{namespace}/deployments/{name}
+PUT    /apis/apps/v1/namespaces/{namespace}/deployments/{name}
+DELETE /apis/apps/v1/namespaces/{namespace}/deployments/{name}
 ```
 
-#### 3.7.2 内置中间件
-
-| 中间件 | 功能 | 配置项 |
-|-------|------|-------|
-| AuditMiddleware | 审计日志 | Level, LogPath, MaxAge |
-| MetricsMiddleware | Prometheus 指标 | Namespace, Subsystem, Path |
-| LoggingMiddleware | 结构化日志 | Level, Format, OutputPath |
-
-### 3.8 Hook 机制
-
-#### 3.8.1 Hook 类型
+### 3.7 Hook 机制
 
 ```go
 const (
@@ -395,27 +436,27 @@ const (
 
 ### 4.1 Core API (core/v1)
 
-| 资源 | Kind | Short Names | Namespace Scoped |
-|-----|------|-------------|-----------------|
-| pods | Pod | po | Yes |
-| services | Service | svc | Yes |
-| configmaps | ConfigMap | cm | Yes |
-| secrets | Secret | sec | Yes |
-| namespaces | Namespace | ns | No |
-| nodes | Node | no | No |
+| 资源 | Kind | Short Names | Namespace Scoped | 子资源 |
+|-----|------|-------------|-----------------|--------|
+| pods | Pod | po | Yes | status |
+| services | Service | svc | Yes | - |
+| configmaps | ConfigMap | cm | Yes | - |
+| secrets | Secret | sec | Yes | - |
+| namespaces | Namespace | ns | No | - |
+| nodes | Node | no | No | - |
 
 ### 4.2 Apps API (apps/v1)
 
-| 资源 | Kind | Short Names | Namespace Scoped |
-|-----|------|-------------|-----------------|
-| deployments | Deployment | deploy | Yes |
-| replicasets | ReplicaSet | rs | Yes |
+| 资源 | Kind | Short Names | Namespace Scoped | 子资源 |
+|-----|------|-------------|-----------------|--------|
+| deployments | Deployment | deploy | Yes | - |
+| replicasets | ReplicaSet | rs | Yes | - |
 
 ### 4.3 Batch API (batch/v1)
 
-| 资源 | Kind | Short Names | Namespace Scoped |
-|-----|------|-------------|-----------------|
-| jobs | Job | - | Yes |
+| 资源 | Kind | Short Names | Namespace Scoped | 子资源 |
+|-----|------|-------------|-----------------|--------|
+| jobs | Job | - | Yes | - |
 
 ---
 
@@ -456,6 +497,9 @@ var MyResourceResource = types.APIResource{
     ObjectType:      &MyResource{},
     ListObjectType:  &MyResourceList{},
     StorageWrapper:  NewMyResourceStorage,
+    Subresources: []*types.APISubresource{
+        {Name: "status", Kind: "MyResourceStatus", Verbs: []string{"get", "update"}},
+    },
 }
 ```
 
@@ -469,7 +513,48 @@ func DefaultAPIManager() *APIManager {
 }
 ```
 
-### 5.2 自定义 Storage 实现
+### 5.2 添加子资源
+
+```go
+// 1. 实现子资源存储
+type MyResourceStatusStorage struct {
+    registry.Storage
+    parentStorage registry.Storage
+}
+
+func NewMyResourceStatusStorage(parentStorage registry.Storage) registry.SubresourceStorage {
+    return &MyResourceStatusStorage{Storage: parentStorage, parentStorage: parentStorage}
+}
+
+func (s *MyResourceStatusStorage) Get(ctx context.Context, parentName string, options *metav1.GetOptions) (runtime.Object, error) {
+    // 获取父资源并返回只包含 status 的对象
+}
+
+func (s *MyResourceStatusStorage) Update(ctx context.Context, parentName string, objInfo UpdatedObjectInfo, ...) (runtime.Object, bool, error) {
+    // 只更新父资源的 status 字段
+}
+
+// 2. 在资源定义中添加子资源
+var MyResourceResource = types.APIResource{
+    // ...
+    Subresources: []*types.APISubresource{
+        {
+            Name:       "status",
+            Kind:       "MyResourceStatus",
+            ObjectType: &MyResource{},
+            Verbs:      []string{"get", "update"},
+        },
+    },
+}
+
+// 3. 在 register.go 中注册子资源存储
+switch sr.Name {
+case "status":
+    srStorage = NewMyResourceStatusStorage(info.Storage)
+}
+```
+
+### 5.3 自定义 Storage 实现
 
 ```go
 type MyResourceStorage struct {
@@ -484,26 +569,6 @@ func (s *MyResourceStorage) Create(ctx context.Context, obj runtime.Object, ...)
     // 自定义创建逻辑
     return s.Storage.Create(ctx, obj, createValidation, options)
 }
-```
-
-### 5.3 添加自定义中间件
-
-```go
-type CustomMiddleware struct{}
-
-func (m *CustomMiddleware) Name() string {
-    return "custom"
-}
-
-func (m *CustomMiddleware) Handler(next http.Handler) http.Handler {
-    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // 前置处理
-        next.ServeHTTP(w, r)
-        // 后置处理
-    })
-}
-
-srv.AddMiddleware(&CustomMiddleware{})
 ```
 
 ---
@@ -570,6 +635,8 @@ go build ./cmd/server
 | 中间件 | ✗ 固定流程 | ✓ 可插拔 |
 | Hook | ✗ 通过 Admission | ✓ 内置支持 |
 | 代理模式 | ✗ Aggregation Layer | ✓ 内置支持 |
+| 子资源 | ✓ 支持 | ✓ 支持 |
+| 自动路由 | ✓ InstallREST | ✓ APIGroupInstaller |
 
 ---
 
@@ -580,3 +647,4 @@ go build ./cmd/server
 3. **认证集成**：可选的 Token 认证
 4. **缓存层**：添加内存缓存提升性能
 5. **分布式支持**：多实例部署支持
+6. **更多子资源**：支持 scale、log、exec 等子资源
