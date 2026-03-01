@@ -2,9 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
@@ -15,415 +12,60 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-type RESTHandler struct {
-	server     *ContainerServer
-	gvr        schema.GroupVersionResource
-	storage    registry.Storage
-	proxy      bool
-	proxyVerbs map[Verb]bool
-}
-
-func NewRESTHandler(server *ContainerServer, gvr schema.GroupVersionResource, storage registry.Storage, proxy bool, proxyVerbs []Verb) *RESTHandler {
-	proxyVerbMap := make(map[Verb]bool)
-	for _, v := range proxyVerbs {
-		proxyVerbMap[v] = true
-	}
-	return &RESTHandler{
-		server:     server,
-		gvr:        gvr,
-		storage:    storage,
-		proxy:      proxy,
-		proxyVerbs: proxyVerbMap,
-	}
-}
-
-func (h *RESTHandler) shouldProxy(verb Verb) bool {
-	return h.proxy && h.proxyVerbs[verb]
-}
-
-func (s *ContainerServer) handleCreate(req *restful.Request, resp *restful.Response) {
+// handleResourceList handles LIST requests for resources.
+func (s *ContainerServer) handleResourceList(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	ctx := req.Request.Context()
-	group := req.PathParameter("group")
-	version := req.PathParameter("version")
-	resource := req.PathParameter("resource")
-
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	handler := NewRESTHandler(s, gvr, storage, true, []Verb{})
-	if handler.shouldProxy(VerbCreate) {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	body, err := io.ReadAll(req.Request.Body)
-	if err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
-	}
-
-	obj := storage.New()
-	if err := json.Unmarshal(body, obj); err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePreCreateHooks(ctx, gvr, obj); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	createOptions := &metav1.CreateOptions{}
-	if err := req.ReadEntity(createOptions); err != nil {
-		createOptions = &metav1.CreateOptions{}
-	}
-
-	result, err := storage.Create(ctx, obj, nil, createOptions)
-	if err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePostCreateHooks(ctx, gvr, result); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp.WriteHeaderAndEntity(http.StatusCreated, result)
-}
-
-func (s *ContainerServer) handleGet(req *restful.Request, resp *restful.Response) {
-	ctx := req.Request.Context()
-	group := req.PathParameter("group")
-	version := req.PathParameter("version")
-	resource := req.PathParameter("resource")
-	name := req.PathParameter("name")
-
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	handler := NewRESTHandler(s, gvr, storage, true, []Verb{})
-	if handler.shouldProxy(VerbGet) {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	getOptions := &metav1.GetOptions{}
-	if err := req.ReadEntity(getOptions); err != nil {
-		getOptions = &metav1.GetOptions{}
-	}
-
-	result, err := storage.Get(ctx, name, getOptions)
-	if err != nil {
-		resp.WriteError(http.StatusNotFound, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePostGetHooks(ctx, gvr, result); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp.WriteEntity(result)
-}
-
-func (s *ContainerServer) handleList(req *restful.Request, resp *restful.Response) {
-	ctx := req.Request.Context()
-	group := req.PathParameter("group")
-	version := req.PathParameter("version")
-	resource := req.PathParameter("resource")
-
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	handler := NewRESTHandler(s, gvr, storage, true, []Verb{})
-	if handler.shouldProxy(VerbList) {
-		s.proxyRequest(req, resp)
-		return
-	}
+	namespace := req.PathParameter("namespace")
 
 	listOptions := &metav1.ListOptions{}
 	if err := req.ReadEntity(listOptions); err != nil {
 		listOptions = &metav1.ListOptions{}
 	}
 
-	result, err := storage.List(ctx, listOptions)
+	result, err := info.Storage.List(ctx, listOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	if err := s.hookRegistry.ExecutePostListHooks(ctx, gvr, result); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
+	if namespace != "" {
+		if err := s.hookRegistry.ExecutePostListHooks(ctx, info.GVR, result); err != nil {
+			resp.WriteError(http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	resp.WriteEntity(result)
 }
 
-func (s *ContainerServer) handleUpdate(req *restful.Request, resp *restful.Response) {
+// handleResourceCreate handles CREATE requests for resources.
+func (s *ContainerServer) handleResourceCreate(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	ctx := req.Request.Context()
-	group := req.PathParameter("group")
-	version := req.PathParameter("version")
-	resource := req.PathParameter("resource")
-	name := req.PathParameter("name")
+	namespace := req.PathParameter("namespace")
 
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	handler := NewRESTHandler(s, gvr, storage, true, []Verb{})
-	if handler.shouldProxy(VerbUpdate) {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	body, err := io.ReadAll(req.Request.Body)
-	if err != nil {
+	obj := info.Storage.New()
+	if err := req.ReadEntity(obj); err != nil {
 		resp.WriteError(http.StatusBadRequest, err)
 		return
 	}
 
-	obj := storage.New()
-	if err := json.Unmarshal(body, obj); err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
+	if meta, ok := obj.(metav1.Object); ok && namespace != "" {
+		meta.SetNamespace(namespace)
 	}
 
-	if err := s.hookRegistry.ExecutePreUpdateHooks(ctx, gvr, obj); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	updateOptions := &metav1.UpdateOptions{}
-	if err := req.ReadEntity(updateOptions); err != nil {
-		updateOptions = &metav1.UpdateOptions{}
-	}
-
-	result, _, err := storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, false, updateOptions)
-	if err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePostUpdateHooks(ctx, gvr, result); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp.WriteEntity(result)
-}
-
-func (s *ContainerServer) handlePatch(req *restful.Request, resp *restful.Response) {
-	s.proxyRequest(req, resp)
-}
-
-func (s *ContainerServer) handleDelete(req *restful.Request, resp *restful.Response) {
-	ctx := req.Request.Context()
-	group := req.PathParameter("group")
-	version := req.PathParameter("version")
-	resource := req.PathParameter("resource")
-	name := req.PathParameter("name")
-
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	handler := NewRESTHandler(s, gvr, storage, true, []Verb{})
-	if handler.shouldProxy(VerbDelete) {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	deleteOptions := &metav1.DeleteOptions{}
-	if err := req.ReadEntity(deleteOptions); err != nil {
-		deleteOptions = &metav1.DeleteOptions{}
-	}
-
-	result, err := storage.Get(ctx, name, &metav1.GetOptions{})
-	if err != nil {
-		resp.WriteError(http.StatusNotFound, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePreDeleteHooks(ctx, gvr, result); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	deletedObj, _, err := storage.Delete(ctx, name, nil, deleteOptions)
-	if err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePostDeleteHooks(ctx, gvr, deletedObj); err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp.WriteEntity(deletedObj)
-}
-
-// handleSubresource handles subresource requests (e.g., pods/status, deployments/scale).
-func (s *ContainerServer) handleSubresource(req *restful.Request, resp *restful.Response) {
-	ctx := req.Request.Context()
-	group := req.PathParameter("group")
-	version := req.PathParameter("version")
-	resource := req.PathParameter("resource")
-	name := req.PathParameter("name")
-	subresource := req.PathParameter("subresource")
-
-	gvr := schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: resource,
-	}
-
-	srInfo, exists := s.resourceRegistry.GetSubresource(gvr, subresource)
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	switch req.Request.Method {
-	case http.MethodGet:
-		s.handleSubresourceGet(ctx, req, resp, srInfo, name)
-	case http.MethodPut, http.MethodPatch:
-		s.handleSubresourceUpdate(ctx, req, resp, srInfo, name)
-	default:
-		resp.WriteError(http.StatusMethodNotAllowed, fmt.Errorf("method %s not allowed for subresource", req.Request.Method))
-	}
-}
-
-// handleSubresourceGet handles GET requests for subresources.
-func (s *ContainerServer) handleSubresourceGet(ctx context.Context, req *restful.Request, resp *restful.Response, srInfo *registry.SubresourceInfo, name string) {
-	getOptions := &metav1.GetOptions{}
-	if err := req.ReadEntity(getOptions); err != nil {
-		getOptions = &metav1.GetOptions{}
-	}
-
-	result, err := srInfo.Storage.Get(ctx, name, getOptions)
-	if err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp.WriteEntity(result)
-}
-
-// handleSubresourceUpdate handles PUT/PATCH requests for subresources.
-func (s *ContainerServer) handleSubresourceUpdate(ctx context.Context, req *restful.Request, resp *restful.Response, srInfo *registry.SubresourceInfo, name string) {
-	body, err := io.ReadAll(req.Request.Body)
-	if err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
-	}
-
-	obj := srInfo.Storage.New()
-	if err := json.Unmarshal(body, obj); err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
-	}
-
-	updateOptions := &metav1.UpdateOptions{}
-	if err := req.ReadEntity(updateOptions); err != nil {
-		updateOptions = &metav1.UpdateOptions{}
-	}
-
-	result, _, err := srInfo.Storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, updateOptions)
-	if err != nil {
-		resp.WriteError(http.StatusInternalServerError, err)
-		return
-	}
-
-	resp.WriteEntity(result)
-}
-
-func (s *ContainerServer) handleCoreCreate(req *restful.Request, resp *restful.Response) {
-	ctx := req.Request.Context()
-	resource := req.PathParameter("resource")
-
-	gvr := schema.GroupVersionResource{
-		Group:    "",
-		Version:  "v1",
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	body, err := io.ReadAll(req.Request.Body)
-	if err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
-	}
-
-	obj := storage.New()
-	if err := json.Unmarshal(body, obj); err != nil {
-		resp.WriteError(http.StatusBadRequest, err)
-		return
-	}
-
-	if err := s.hookRegistry.ExecutePreCreateHooks(ctx, gvr, obj); err != nil {
+	if err := s.hookRegistry.ExecutePreCreateHooks(ctx, info.GVR, obj); err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
 	createOptions := &metav1.CreateOptions{}
-	result, err := storage.Create(ctx, obj, nil, createOptions)
+	result, err := info.Storage.Create(ctx, obj, nil, createOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	if err := s.hookRegistry.ExecutePostCreateHooks(ctx, gvr, result); err != nil {
+	if err := s.hookRegistry.ExecutePostCreateHooks(ctx, info.GVR, result); err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -431,30 +73,23 @@ func (s *ContainerServer) handleCoreCreate(req *restful.Request, resp *restful.R
 	resp.WriteHeaderAndEntity(http.StatusCreated, result)
 }
 
-func (s *ContainerServer) handleCoreGet(req *restful.Request, resp *restful.Response) {
+// handleResourceGet handles GET requests for resources.
+func (s *ContainerServer) handleResourceGet(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	ctx := req.Request.Context()
-	resource := req.PathParameter("resource")
 	name := req.PathParameter("name")
 
-	gvr := schema.GroupVersionResource{
-		Group:    "",
-		Version:  "v1",
-		Resource: resource,
+	getOptions := &metav1.GetOptions{}
+	if err := req.ReadEntity(getOptions); err != nil {
+		getOptions = &metav1.GetOptions{}
 	}
 
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	result, err := storage.Get(ctx, name, &metav1.GetOptions{})
+	result, err := info.Storage.Get(ctx, name, getOptions)
 	if err != nil {
 		resp.WriteError(http.StatusNotFound, err)
 		return
 	}
 
-	if err := s.hookRegistry.ExecutePostGetHooks(ctx, gvr, result); err != nil {
+	if err := s.hookRegistry.ExecutePostGetHooks(ctx, info.GVR, result); err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -462,29 +97,35 @@ func (s *ContainerServer) handleCoreGet(req *restful.Request, resp *restful.Resp
 	resp.WriteEntity(result)
 }
 
-func (s *ContainerServer) handleCoreList(req *restful.Request, resp *restful.Response) {
+// handleResourceUpdate handles UPDATE requests for resources.
+func (s *ContainerServer) handleResourceUpdate(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	ctx := req.Request.Context()
-	resource := req.PathParameter("resource")
+	name := req.PathParameter("name")
+	namespace := req.PathParameter("namespace")
 
-	gvr := schema.GroupVersionResource{
-		Group:    "",
-		Version:  "v1",
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
+	obj := info.Storage.New()
+	if err := req.ReadEntity(obj); err != nil {
+		resp.WriteError(http.StatusBadRequest, err)
 		return
 	}
 
-	result, err := storage.List(ctx, &metav1.ListOptions{})
+	if meta, ok := obj.(metav1.Object); ok && namespace != "" {
+		meta.SetNamespace(namespace)
+	}
+
+	if err := s.hookRegistry.ExecutePreUpdateHooks(ctx, info.GVR, obj); err != nil {
+		resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	updateOptions := &metav1.UpdateOptions{}
+	result, _, err := info.Storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, false, updateOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	if err := s.hookRegistry.ExecutePostListHooks(ctx, gvr, result); err != nil {
+	if err := s.hookRegistry.ExecutePostUpdateHooks(ctx, info.GVR, result); err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
@@ -492,54 +133,102 @@ func (s *ContainerServer) handleCoreList(req *restful.Request, resp *restful.Res
 	resp.WriteEntity(result)
 }
 
-func (s *ContainerServer) handleCoreUpdate(req *restful.Request, resp *restful.Response) {
+// handleResourcePatch handles PATCH requests for resources.
+func (s *ContainerServer) handleResourcePatch(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	s.proxyRequest(req, resp)
 }
 
-func (s *ContainerServer) handleCorePatch(req *restful.Request, resp *restful.Response) {
-	s.proxyRequest(req, resp)
-}
-
-func (s *ContainerServer) handleCoreDelete(req *restful.Request, resp *restful.Response) {
+// handleResourceDelete handles DELETE requests for resources.
+func (s *ContainerServer) handleResourceDelete(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
 	ctx := req.Request.Context()
-	resource := req.PathParameter("resource")
 	name := req.PathParameter("name")
 
-	gvr := schema.GroupVersionResource{
-		Group:    "",
-		Version:  "v1",
-		Resource: resource,
-	}
-
-	storage, exists := s.storageRegistry[gvr]
-	if !exists {
-		s.proxyRequest(req, resp)
-		return
-	}
-
-	result, err := storage.Get(ctx, name, &metav1.GetOptions{})
+	result, err := info.Storage.Get(ctx, name, &metav1.GetOptions{})
 	if err != nil {
 		resp.WriteError(http.StatusNotFound, err)
 		return
 	}
 
-	if err := s.hookRegistry.ExecutePreDeleteHooks(ctx, gvr, result); err != nil {
+	if err := s.hookRegistry.ExecutePreDeleteHooks(ctx, info.GVR, result); err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	deletedObj, _, err := storage.Delete(ctx, name, nil, &metav1.DeleteOptions{})
+	deleteOptions := &metav1.DeleteOptions{}
+	deletedObj, _, err := info.Storage.Delete(ctx, name, nil, deleteOptions)
 	if err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
-	if err := s.hookRegistry.ExecutePostDeleteHooks(ctx, gvr, deletedObj); err != nil {
+	if err := s.hookRegistry.ExecutePostDeleteHooks(ctx, info.GVR, deletedObj); err != nil {
 		resp.WriteError(http.StatusInternalServerError, err)
 		return
 	}
 
 	resp.WriteEntity(deletedObj)
+}
+
+// handleResourceDeleteCollection handles DELETECOLLECTION requests for resources.
+func (s *ContainerServer) handleResourceDeleteCollection(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
+	ctx := req.Request.Context()
+
+	deleteOptions := &metav1.DeleteOptions{}
+	listOptions := &metav1.ListOptions{}
+
+	result, err := info.Storage.DeleteCollection(ctx, nil, deleteOptions, listOptions)
+	if err != nil {
+		resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	resp.WriteEntity(result)
+}
+
+// handleResourceWatch handles WATCH requests for resources.
+func (s *ContainerServer) handleResourceWatch(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo) {
+	s.proxyRequest(req, resp)
+}
+
+// handleSubresourceGet handles GET requests for subresources.
+func (s *ContainerServer) handleSubresourceGet(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo, sr *registry.SubresourceInfo) {
+	ctx := req.Request.Context()
+	name := req.PathParameter("name")
+
+	getOptions := &metav1.GetOptions{}
+	result, err := sr.Storage.Get(ctx, name, getOptions)
+	if err != nil {
+		resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	resp.WriteEntity(result)
+}
+
+// handleSubresourceUpdate handles UPDATE requests for subresources.
+func (s *ContainerServer) handleSubresourceUpdate(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo, sr *registry.SubresourceInfo) {
+	ctx := req.Request.Context()
+	name := req.PathParameter("name")
+
+	obj := sr.Storage.New()
+	if err := req.ReadEntity(obj); err != nil {
+		resp.WriteError(http.StatusBadRequest, err)
+		return
+	}
+
+	updateOptions := &metav1.UpdateOptions{}
+	result, _, err := sr.Storage.Update(ctx, name, &simpleUpdatedObjectInfo{obj: obj}, nil, nil, updateOptions)
+	if err != nil {
+		resp.WriteError(http.StatusInternalServerError, err)
+		return
+	}
+
+	resp.WriteEntity(result)
+}
+
+// handleSubresourcePatch handles PATCH requests for subresources.
+func (s *ContainerServer) handleSubresourcePatch(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo, sr *registry.SubresourceInfo) {
+	s.proxyRequest(req, resp)
 }
 
 type simpleUpdatedObjectInfo struct {
@@ -553,12 +242,22 @@ func (i *simpleUpdatedObjectInfo) UpdatedObject(ctx context.Context, oldObj runt
 var _ registry.UpdatedObjectInfo = &simpleUpdatedObjectInfo{}
 
 func parseGVRFromPath(path string) schema.GroupVersionResource {
-	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	path = strings.Trim(path, "/")
+	parts := strings.Split(path, "/")
+
 	if len(parts) >= 3 {
-		return schema.GroupVersionResource{
-			Group:    parts[0],
-			Version:  parts[1],
-			Resource: parts[2],
+		if parts[0] == "api" {
+			return schema.GroupVersionResource{
+				Group:    "",
+				Version:  parts[1],
+				Resource: parts[2],
+			}
+		} else if parts[0] == "apis" && len(parts) >= 4 {
+			return schema.GroupVersionResource{
+				Group:    parts[1],
+				Version:  parts[2],
+				Resource: parts[3],
+			}
 		}
 	}
 	return schema.GroupVersionResource{}

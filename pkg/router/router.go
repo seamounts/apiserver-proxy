@@ -1,300 +1,469 @@
 // Package router provides HTTP routing functionality for the API server.
-// It implements a hierarchical router structure for Kubernetes-style API paths.
+// It implements automatic route generation based on registered API resources,
+// using go-restful as the underlying REST framework.
 package router
 
 import (
 	"fmt"
 	"net/http"
-	"strings"
 
+	"github.com/emicklei/go-restful/v3"
+	"github.com/seamounts/apiserver-proxy/pkg/registry"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// Route represents a single HTTP route.
-type Route struct {
-	// Method is the HTTP method (GET, POST, PUT, DELETE, etc.)
-	Method string
-	// Path is the URL path pattern
-	Path string
-	// Handler is the HTTP handler function
-	Handler http.HandlerFunc
-	// GVR is the GroupVersionResource for this route
-	GVR schema.GroupVersionResource
-	// Verb is the API verb (get, list, create, update, delete)
-	Verb string
-	// SubResource is the subresource name (if applicable)
-	SubResource string
+// HandlerFunc is a function type for handling REST requests.
+type HandlerFunc func(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo)
+
+// SubresourceHandlerFunc is a function type for handling subresource requests.
+type SubresourceHandlerFunc func(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo, sr *registry.SubresourceInfo)
+
+// Handlers contains the handler functions for resource operations.
+type Handlers struct {
+	List              HandlerFunc
+	Create            HandlerFunc
+	Get               HandlerFunc
+	Update            HandlerFunc
+	Patch             HandlerFunc
+	Delete            HandlerFunc
+	DeleteCollection  HandlerFunc
+	Watch             HandlerFunc
+	SubresourceGet    SubresourceHandlerFunc
+	SubresourceUpdate SubresourceHandlerFunc
+	SubresourcePatch  SubresourceHandlerFunc
 }
 
-// Router is the main router that manages all routes.
-type Router struct {
-	routes         []*Route
-	groups         map[string]*GroupRouter
-	parameterCodec ParameterCodec
-}
-
-// GroupRouter manages routes for an API group.
-type GroupRouter struct {
-	group    string
-	versions map[string]*VersionRouter
-}
-
-// VersionRouter manages routes for an API group-version.
-type VersionRouter struct {
+// APIGroupInstaller installs REST routes for an API group.
+type APIGroupInstaller struct {
+	groupName    string
 	groupVersion schema.GroupVersion
-	resources    map[string]*ResourceRouter
+	registry     *registry.ResourceRegistry
+	handlers     *Handlers
 }
 
-// ResourceRouter manages routes for a specific resource.
-type ResourceRouter struct {
-	gvr       schema.GroupVersionResource
-	storage   interface{}
-	subrouter map[string]*SubresourceRouter
-}
-
-// SubresourceRouter manages routes for a subresource.
-type SubresourceRouter struct {
-	gvr         schema.GroupVersionResource
-	subresource string
-	storage     interface{}
-}
-
-// ParameterCodec is an interface for encoding/decoding request parameters.
-type ParameterCodec interface {
-	DecodeParameters(req *http.Request, into interface{}) error
-	EncodeParameters(obj interface{}, req *http.Request) error
-}
-
-// NewRouter creates a new Router instance.
-func NewRouter() *Router {
-	return &Router{
-		routes: make([]*Route, 0),
-		groups: make(map[string]*GroupRouter),
+// NewAPIGroupInstaller creates a new APIGroupInstaller.
+func NewAPIGroupInstaller(gv schema.GroupVersion, reg *registry.ResourceRegistry, handlers *Handlers) *APIGroupInstaller {
+	return &APIGroupInstaller{
+		groupName:    gv.Group,
+		groupVersion: gv,
+		registry:     reg,
+		handlers:     handlers,
 	}
 }
 
-// AddRoute adds a route to the router.
-func (r *Router) AddRoute(route *Route) {
-	r.routes = append(r.routes, route)
+// Install installs REST routes for all resources in the API group.
+func (i *APIGroupInstaller) Install() *restful.WebService {
+	ws := new(restful.WebService)
+
+	if i.groupName == "" {
+		ws.Path(fmt.Sprintf("/api/%s", i.groupVersion.Version))
+	} else {
+		ws.Path(fmt.Sprintf("/apis/%s/%s", i.groupName, i.groupVersion.Version))
+	}
+	ws.Consumes(restful.MIME_JSON, "application/yaml")
+	ws.Produces(restful.MIME_JSON, "application/yaml")
+
+	resources := i.getResourcesForGroup()
+
+	for _, resourceInfo := range resources {
+		i.installResourceRoutes(ws, resourceInfo)
+	}
+
+	return ws
 }
 
-// Routes returns all registered routes.
-func (r *Router) Routes() []*Route {
-	return r.routes
-}
+// getResourcesForGroup returns all resources for this API group.
+func (i *APIGroupInstaller) getResourcesForGroup() []*registry.ResourceInfo {
+	var result []*registry.ResourceInfo
 
-// Match finds a route that matches the given HTTP request.
-func (r *Router) Match(req *http.Request) (*Route, bool) {
-	for _, route := range r.routes {
-		if route.Method == req.Method && matchPath(route.Path, req.URL.Path) {
-			return route, true
+	for _, info := range i.registry.ListResources() {
+		if info.GVR.Group == i.groupName && info.GVR.Version == i.groupVersion.Version {
+			result = append(result, info)
 		}
 	}
-	return nil, false
+
+	return result
 }
 
-// matchPath checks if a path matches a pattern.
-// Pattern can contain placeholders like {name} which match any value.
-func matchPath(pattern, path string) bool {
-	patternParts := strings.Split(strings.Trim(pattern, "/"), "/")
-	pathParts := strings.Split(strings.Trim(path, "/"), "/")
+// installResourceRoutes installs routes for a single resource.
+func (i *APIGroupInstaller) installResourceRoutes(ws *restful.WebService, info *registry.ResourceInfo) {
+	resourcePath := info.GVR.Resource
 
-	if len(patternParts) != len(pathParts) {
-		return false
+	verbs := make(map[string]bool)
+	for _, v := range info.Verbs {
+		verbs[v] = true
 	}
 
-	for i := 0; i < len(patternParts); i++ {
-		if strings.HasPrefix(patternParts[i], "{") && strings.HasSuffix(patternParts[i], "}") {
+	if info.NamespaceScoped {
+		i.installNamespacedRoutes(ws, resourcePath, info, verbs)
+	} else {
+		i.installClusterScopedRoutes(ws, resourcePath, info, verbs)
+	}
+
+	for _, sr := range info.Subresources {
+		i.installSubresourceRoutes(ws, resourcePath, info, sr)
+	}
+}
+
+// installNamespacedRoutes installs routes for namespace-scoped resources.
+func (i *APIGroupInstaller) installNamespacedRoutes(ws *restful.WebService, resourcePath string, info *registry.ResourceInfo, verbs map[string]bool) {
+	basePath := fmt.Sprintf("/namespaces/{namespace}/%s", resourcePath)
+	itemPath := fmt.Sprintf("%s/{name}", basePath)
+
+	if verbs["list"] {
+		ws.Route(ws.GET(basePath).
+			To(i.createListHandler(info)).
+			Doc(fmt.Sprintf("List %s in a namespace", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Writes(info.ListObjectType))
+	}
+
+	if verbs["create"] {
+		ws.Route(ws.POST(basePath).
+			To(i.createCreateHandler(info)).
+			Doc(fmt.Sprintf("Create a %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Reads(info.ObjectType).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["deletecollection"] {
+		ws.Route(ws.DELETE(basePath).
+			To(i.createDeleteCollectionHandler(info)).
+			Doc(fmt.Sprintf("Delete collection of %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")))
+	}
+
+	if verbs["get"] {
+		ws.Route(ws.GET(itemPath).
+			To(i.createGetHandler(info)).
+			Doc(fmt.Sprintf("Get a %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Param(ws.PathParameter("name", "resource name")).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["update"] {
+		ws.Route(ws.PUT(itemPath).
+			To(i.createUpdateHandler(info)).
+			Doc(fmt.Sprintf("Update a %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Param(ws.PathParameter("name", "resource name")).
+			Reads(info.ObjectType).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["patch"] {
+		ws.Route(ws.PATCH(itemPath).
+			To(i.createPatchHandler(info)).
+			Doc(fmt.Sprintf("Patch a %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Param(ws.PathParameter("name", "resource name")).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["delete"] {
+		ws.Route(ws.DELETE(itemPath).
+			To(i.createDeleteHandler(info)).
+			Doc(fmt.Sprintf("Delete a %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Param(ws.PathParameter("name", "resource name")).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["watch"] {
+		ws.Route(ws.GET(basePath).
+			To(i.createWatchHandler(info)).
+			Doc(fmt.Sprintf("Watch %s", info.SingularName)).
+			Param(ws.PathParameter("namespace", "namespace name")).
+			Param(ws.QueryParameter("watch", "watch the resource")))
+	}
+}
+
+// installClusterScopedRoutes installs routes for cluster-scoped resources.
+func (i *APIGroupInstaller) installClusterScopedRoutes(ws *restful.WebService, resourcePath string, info *registry.ResourceInfo, verbs map[string]bool) {
+	basePath := fmt.Sprintf("/%s", resourcePath)
+	itemPath := fmt.Sprintf("%s/{name}", basePath)
+
+	if verbs["list"] {
+		ws.Route(ws.GET(basePath).
+			To(i.createListHandler(info)).
+			Doc(fmt.Sprintf("List all %s", info.SingularName)).
+			Writes(info.ListObjectType))
+	}
+
+	if verbs["create"] {
+		ws.Route(ws.POST(basePath).
+			To(i.createCreateHandler(info)).
+			Doc(fmt.Sprintf("Create a %s", info.SingularName)).
+			Reads(info.ObjectType).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["deletecollection"] {
+		ws.Route(ws.DELETE(basePath).
+			To(i.createDeleteCollectionHandler(info)).
+			Doc(fmt.Sprintf("Delete collection of %s", info.SingularName)))
+	}
+
+	if verbs["get"] {
+		ws.Route(ws.GET(itemPath).
+			To(i.createGetHandler(info)).
+			Doc(fmt.Sprintf("Get a %s", info.SingularName)).
+			Param(ws.PathParameter("name", "resource name")).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["update"] {
+		ws.Route(ws.PUT(itemPath).
+			To(i.createUpdateHandler(info)).
+			Doc(fmt.Sprintf("Update a %s", info.SingularName)).
+			Param(ws.PathParameter("name", "resource name")).
+			Reads(info.ObjectType).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["patch"] {
+		ws.Route(ws.PATCH(itemPath).
+			To(i.createPatchHandler(info)).
+			Doc(fmt.Sprintf("Patch a %s", info.SingularName)).
+			Param(ws.PathParameter("name", "resource name")).
+			Writes(info.ObjectType))
+	}
+
+	if verbs["delete"] {
+		ws.Route(ws.DELETE(itemPath).
+			To(i.createDeleteHandler(info)).
+			Doc(fmt.Sprintf("Delete a %s", info.SingularName)).
+			Param(ws.PathParameter("name", "resource name")).
+			Writes(info.ObjectType))
+	}
+}
+
+// installSubresourceRoutes installs routes for subresources.
+func (i *APIGroupInstaller) installSubresourceRoutes(ws *restful.WebService, resourcePath string, info *registry.ResourceInfo, sr *registry.SubresourceInfo) {
+	var itemPath string
+
+	if info.NamespaceScoped {
+		itemPath = fmt.Sprintf("/namespaces/{namespace}/%s/{name}/%s", resourcePath, sr.Name)
+	} else {
+		itemPath = fmt.Sprintf("/%s/{name}/%s", resourcePath, sr.Name)
+	}
+
+	srVerbs := make(map[string]bool)
+	for _, v := range sr.Verbs {
+		srVerbs[v] = true
+	}
+
+	if srVerbs["get"] {
+		ws.Route(ws.GET(itemPath).
+			To(i.createSubresourceGetHandler(info, sr)).
+			Doc(fmt.Sprintf("Get %s/%s", info.SingularName, sr.Name)).
+			Writes(info.ObjectType))
+	}
+
+	if srVerbs["update"] {
+		ws.Route(ws.PUT(itemPath).
+			To(i.createSubresourceUpdateHandler(info, sr)).
+			Doc(fmt.Sprintf("Update %s/%s", info.SingularName, sr.Name)).
+			Reads(info.ObjectType).
+			Writes(info.ObjectType))
+	}
+
+	if srVerbs["patch"] {
+		ws.Route(ws.PATCH(itemPath).
+			To(i.createSubresourcePatchHandler(info, sr)).
+			Doc(fmt.Sprintf("Patch %s/%s", info.SingularName, sr.Name)).
+			Writes(info.ObjectType))
+	}
+}
+
+// Handler factory methods
+
+func (i *APIGroupInstaller) createListHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.List != nil {
+			i.handlers.List(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("list not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createCreateHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.Create != nil {
+			i.handlers.Create(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("create not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createGetHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.Get != nil {
+			i.handlers.Get(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("get not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createUpdateHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.Update != nil {
+			i.handlers.Update(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("update not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createPatchHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.Patch != nil {
+			i.handlers.Patch(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("patch not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createDeleteHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.Delete != nil {
+			i.handlers.Delete(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("delete not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createDeleteCollectionHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.DeleteCollection != nil {
+			i.handlers.DeleteCollection(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("deletecollection not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createWatchHandler(info *registry.ResourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.Watch != nil {
+			i.handlers.Watch(req, resp, info)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("watch not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createSubresourceGetHandler(info *registry.ResourceInfo, sr *registry.SubresourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.SubresourceGet != nil {
+			i.handlers.SubresourceGet(req, resp, info, sr)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("subresource get not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createSubresourceUpdateHandler(info *registry.ResourceInfo, sr *registry.SubresourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.SubresourceUpdate != nil {
+			i.handlers.SubresourceUpdate(req, resp, info, sr)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("subresource update not implemented"))
+		}
+	}
+}
+
+func (i *APIGroupInstaller) createSubresourcePatchHandler(info *registry.ResourceInfo, sr *registry.SubresourceInfo) restful.RouteFunction {
+	return func(req *restful.Request, resp *restful.Response) {
+		if i.handlers.SubresourcePatch != nil {
+			i.handlers.SubresourcePatch(req, resp, info, sr)
+		} else {
+			resp.WriteError(http.StatusNotImplemented, fmt.Errorf("subresource patch not implemented"))
+		}
+	}
+}
+
+// Router manages all API routes.
+type Router struct {
+	registry *registry.ResourceRegistry
+	handlers *Handlers
+}
+
+// NewRouter creates a new Router.
+func NewRouter(reg *registry.ResourceRegistry, handlers *Handlers) *Router {
+	return &Router{
+		registry: reg,
+		handlers: handlers,
+	}
+}
+
+// InstallAll installs routes for all registered API groups.
+func (r *Router) InstallAll() []*restful.WebService {
+	var webServices []*restful.WebService
+
+	groups := r.registry.ListGroups()
+	installedGroups := make(map[string]bool)
+
+	for _, group := range groups {
+		groupKey := group.GroupVersion.String()
+		if installedGroups[groupKey] {
 			continue
 		}
-		if patternParts[i] != pathParts[i] {
-			return false
-		}
+		installedGroups[groupKey] = true
+
+		installer := NewAPIGroupInstaller(group.GroupVersion, r.registry, r.handlers)
+		ws := installer.Install()
+		webServices = append(webServices, ws)
 	}
 
-	return true
+	return webServices
 }
 
-// Group returns or creates a GroupRouter for the given API group.
-func (r *Router) Group(group string) *GroupRouter {
-	if _, exists := r.groups[group]; !exists {
-		r.groups[group] = &GroupRouter{
-			group:    group,
-			versions: make(map[string]*VersionRouter),
-		}
-	}
-	return r.groups[group]
-}
+// InstallAPIGroupsHandler installs the /apis handler.
+func InstallAPIGroupsHandler(reg *registry.ResourceRegistry) *restful.WebService {
+	ws := new(restful.WebService)
+	ws.Path("/apis")
+	ws.Consumes(restful.MIME_JSON)
+	ws.Produces(restful.MIME_JSON)
 
-// Version returns or creates a VersionRouter for the given API version.
-func (g *GroupRouter) Version(version string) *VersionRouter {
-	if _, exists := g.versions[version]; !exists {
-		g.versions[version] = &VersionRouter{
-			groupVersion: schema.GroupVersion{Group: g.group, Version: version},
-			resources:    make(map[string]*ResourceRouter),
-		}
-	}
-	return g.versions[version]
-}
+	ws.Route(ws.GET("/").To(func(req *restful.Request, resp *restful.Response) {
+		groups := reg.ListGroups()
 
-// Resource returns or creates a ResourceRouter for the given resource.
-func (v *VersionRouter) Resource(resource string, storage interface{}) *ResourceRouter {
-	if _, exists := v.resources[resource]; !exists {
-		v.resources[resource] = &ResourceRouter{
-			gvr: schema.GroupVersionResource{
-				Group:    v.groupVersion.Group,
-				Version:  v.groupVersion.Version,
-				Resource: resource,
+		apiGroups := &metav1.APIGroupList{
+			TypeMeta: metav1.TypeMeta{
+				Kind:       "APIGroupList",
+				APIVersion: "v1",
 			},
-			storage:   storage,
-			subrouter: make(map[string]*SubresourceRouter),
+			Groups: make([]metav1.APIGroup, 0, len(groups)),
 		}
-	}
-	return v.resources[resource]
-}
 
-// Subresource returns or creates a SubresourceRouter for the given subresource.
-func (r *ResourceRouter) Subresource(subresource string, storage interface{}) *SubresourceRouter {
-	if _, exists := r.subrouter[subresource]; !exists {
-		r.subrouter[subresource] = &SubresourceRouter{
-			gvr: schema.GroupVersionResource{
-				Group:    r.gvr.Group,
-				Version:  r.gvr.Version,
-				Resource: r.gvr.Resource + "/" + subresource,
-			},
-			subresource: subresource,
-			storage:     storage,
-		}
-	}
-	return r.subrouter[subresource]
-}
-
-// PathResolver resolves API paths to GVR and other components.
-type PathResolver struct {
-	groupPrefix string
-}
-
-// NewPathResolver creates a new PathResolver.
-func NewPathResolver(groupPrefix string) *PathResolver {
-	return &PathResolver{
-		groupPrefix: groupPrefix,
-	}
-}
-
-// ParsePath parses an API path into its components.
-// Returns the GVR, resource name, subresource, and any error.
-func (r *PathResolver) ParsePath(path string) (gvr schema.GroupVersionResource, name string, subresource string, err error) {
-	path = strings.TrimPrefix(path, "/")
-	parts := strings.Split(path, "/")
-
-	if len(parts) < 3 {
-		return gvr, "", "", ErrInvalidPath
-	}
-
-	if parts[0] == "api" {
-		if len(parts) >= 3 {
-			gvr.Version = parts[1]
-			gvr.Resource = parts[2]
-			if len(parts) >= 4 {
-				name = parts[3]
+		for _, group := range groups {
+			apiGroup := metav1.APIGroup{
+				Name: group.GroupVersion.Group,
+				Versions: []metav1.GroupVersionForDiscovery{
+					{
+						GroupVersion: group.GroupVersion.String(),
+						Version:      group.GroupVersion.Version,
+					},
+				},
+				PreferredVersion: metav1.GroupVersionForDiscovery{
+					GroupVersion: group.GroupVersion.String(),
+					Version:      group.GroupVersion.Version,
+				},
 			}
-			if len(parts) >= 5 {
-				subresource = parts[4]
-			}
+			apiGroups.Groups = append(apiGroups.Groups, apiGroup)
 		}
-	} else if parts[0] == "apis" {
-		if len(parts) >= 4 {
-			gvr.Group = parts[1]
-			gvr.Version = parts[2]
-			gvr.Resource = parts[3]
-			if len(parts) >= 5 {
-				name = parts[4]
-			}
-			if len(parts) >= 6 {
-				subresource = parts[5]
-			}
-		}
-	}
 
-	return gvr, name, subresource, nil
-}
+		resp.WriteEntity(apiGroups)
+	}))
 
-// BuildPath constructs an API path from the given components.
-func (r *PathResolver) BuildPath(gvr schema.GroupVersionResource, name string, subresource string) string {
-	var path string
-
-	if gvr.Group == "" {
-		path = "/api/" + gvr.Version + "/" + gvr.Resource
-	} else {
-		path = "/apis/" + gvr.Group + "/" + gvr.Version + "/" + gvr.Resource
-	}
-
-	if name != "" {
-		path += "/" + name
-	}
-
-	if subresource != "" {
-		path += "/" + subresource
-	}
-
-	return path
-}
-
-// ErrInvalidPath is returned when a path cannot be parsed.
-var ErrInvalidPath = fmt.Errorf("invalid path")
-
-// APIRoute represents a parsed API route.
-type APIRoute struct {
-	Method       string
-	Path         string
-	Verb         string
-	Resource     string
-	SubResource  string
-	Namespace    string
-	Name         string
-	GroupVersion schema.GroupVersion
-}
-
-// ParseAPIRoute parses an API path into an APIRoute structure.
-func ParseAPIRoute(path string) (*APIRoute, error) {
-	route := &APIRoute{}
-
-	path = strings.Trim(path, "/")
-	parts := strings.Split(path, "/")
-
-	if len(parts) < 2 {
-		return nil, ErrInvalidPath
-	}
-
-	if parts[0] == "api" {
-		if len(parts) >= 2 {
-			route.GroupVersion = schema.GroupVersion{Group: "", Version: parts[1]}
-		}
-		if len(parts) >= 3 {
-			route.Resource = parts[2]
-		}
-		if len(parts) >= 4 {
-			route.Name = parts[3]
-		}
-		if len(parts) >= 5 {
-			route.SubResource = parts[4]
-		}
-	} else if parts[0] == "apis" {
-		if len(parts) >= 3 {
-			route.GroupVersion = schema.GroupVersion{Group: parts[1], Version: parts[2]}
-		}
-		if len(parts) >= 4 {
-			route.Resource = parts[3]
-		}
-		if len(parts) >= 5 {
-			route.Name = parts[4]
-		}
-		if len(parts) >= 6 {
-			route.SubResource = parts[5]
-		}
-	} else {
-		return nil, ErrInvalidPath
-	}
-
-	return route, nil
+	return ws
 }

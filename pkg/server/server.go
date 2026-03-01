@@ -8,6 +8,8 @@ import (
 
 	"github.com/emicklei/go-restful/v3"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
+	"github.com/seamounts/apiserver-proxy/pkg/router"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/rest"
@@ -51,14 +53,14 @@ func NewContainerServer(cfg *Config) (*ContainerServer, error) {
 	}
 
 	s := &ContainerServer{
-		config:          cfg,
-		scheme:          scheme,
-		kubeRESTConfig:  kubeRESTConfig,
-		proxyTransport:  proxyTransport,
-		storageRegistry: make(map[schema.GroupVersionResource]registry.Storage),
+		config:           cfg,
+		scheme:           scheme,
+		kubeRESTConfig:   kubeRESTConfig,
+		proxyTransport:   proxyTransport,
+		storageRegistry:  make(map[schema.GroupVersionResource]registry.Storage),
 		resourceRegistry: registry.NewResourceRegistry(),
-		hookRegistry:    NewHookRegistry(),
-		middlewareChain: make([]Middleware, 0),
+		hookRegistry:     NewHookRegistry(),
+		middlewareChain:  make([]Middleware, 0),
 	}
 
 	return s, nil
@@ -193,42 +195,70 @@ func (s *ContainerServer) Run(ctx context.Context) error {
 	}
 }
 
-// setupRoutes configures the REST routes for the server.
+// setupRoutes configures the REST routes for the server based on registered resources.
 func (s *ContainerServer) setupRoutes() *restful.Container {
 	restContainer := restful.NewContainer()
 	restContainer.Router(restful.CurlyRouter{})
 
-	ws := new(restful.WebService)
-	ws.Path("/apis")
-	ws.Consumes(restful.MIME_JSON)
-	ws.Produces(restful.MIME_JSON)
+	if s.resourceRegistry == nil {
+		return restContainer
+	}
 
-	ws.Route(ws.GET("/{group}/{version}/{resource}").To(s.handleList))
-	ws.Route(ws.POST("/{group}/{version}/{resource}").To(s.handleCreate))
-	ws.Route(ws.GET("/{group}/{version}/{resource}/{name}").To(s.handleGet))
-	ws.Route(ws.PUT("/{group}/{version}/{resource}/{name}").To(s.handleUpdate))
-	ws.Route(ws.PATCH("/{group}/{version}/{resource}/{name}").To(s.handlePatch))
-	ws.Route(ws.DELETE("/{group}/{version}/{resource}/{name}").To(s.handleDelete))
-	ws.Route(ws.GET("/{group}/{version}/{resource}/{name}/{subresource}").To(s.handleSubresource))
-	ws.Route(ws.POST("/{group}/{version}/{resource}/{name}/{subresource}").To(s.handleSubresource))
+	handlers := &router.Handlers{
+		List:              s.handleResourceList,
+		Create:            s.handleResourceCreate,
+		Get:               s.handleResourceGet,
+		Update:            s.handleResourceUpdate,
+		Patch:             s.handleResourcePatch,
+		Delete:            s.handleResourceDelete,
+		DeleteCollection:  s.handleResourceDeleteCollection,
+		Watch:             s.handleResourceWatch,
+		SubresourceGet:    s.handleSubresourceGet,
+		SubresourceUpdate: s.handleSubresourceUpdate,
+		SubresourcePatch:  s.handleSubresourcePatch,
+	}
 
-	restContainer.Add(ws)
+	r := router.NewRouter(s.resourceRegistry, handlers)
+	webServices := r.InstallAll()
+	for _, ws := range webServices {
+		restContainer.Add(ws)
+	}
 
-	wsCore := new(restful.WebService)
-	wsCore.Path("/api/v1")
-	wsCore.Consumes(restful.MIME_JSON)
-	wsCore.Produces(restful.MIME_JSON)
-
-	wsCore.Route(wsCore.GET("/{resource}").To(s.handleCoreList))
-	wsCore.Route(wsCore.POST("/{resource}").To(s.handleCoreCreate))
-	wsCore.Route(wsCore.GET("/{resource}/{name}").To(s.handleCoreGet))
-	wsCore.Route(wsCore.PUT("/{resource}/{name}").To(s.handleCoreUpdate))
-	wsCore.Route(wsCore.PATCH("/{resource}/{name}").To(s.handleCorePatch))
-	wsCore.Route(wsCore.DELETE("/{resource}/{name}").To(s.handleCoreDelete))
-
-	restContainer.Add(wsCore)
+	restContainer.Add(router.InstallAPIGroupsHandler(s.resourceRegistry))
 
 	return restContainer
+}
+
+// handleAPIGroups returns the list of available API groups.
+func (s *ContainerServer) handleAPIGroups(req *restful.Request, resp *restful.Response) {
+	groups := s.resourceRegistry.ListGroups()
+
+	apiGroups := &metav1.APIGroupList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "APIGroupList",
+			APIVersion: "v1",
+		},
+		Groups: make([]metav1.APIGroup, 0, len(groups)),
+	}
+
+	for _, group := range groups {
+		apiGroup := metav1.APIGroup{
+			Name: group.GroupVersion.Group,
+			Versions: []metav1.GroupVersionForDiscovery{
+				{
+					GroupVersion: group.GroupVersion.String(),
+					Version:      group.GroupVersion.Version,
+				},
+			},
+			PreferredVersion: metav1.GroupVersionForDiscovery{
+				GroupVersion: group.GroupVersion.String(),
+				Version:      group.GroupVersion.Version,
+			},
+		}
+		apiGroups.Groups = append(apiGroups.Groups, apiGroup)
+	}
+
+	resp.WriteEntity(apiGroups)
 }
 
 // NewHookRegistry creates a new HookRegistry with empty hook slices.
