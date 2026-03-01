@@ -60,7 +60,7 @@ func NewContainerServer(cfg *Config) (*ContainerServer, error) {
 		storageRegistry:  make(map[schema.GroupVersionResource]registry.Storage),
 		resourceRegistry: registry.NewResourceRegistry(),
 		hookRegistry:     NewHookRegistry(),
-		middlewareChain:  make([]Middleware, 0),
+		filterChain:      NewFilterChain(),
 	}
 
 	return s, nil
@@ -140,9 +140,9 @@ func (s *ContainerServer) SetResourceRegistry(rr *registry.ResourceRegistry) {
 	}
 }
 
-// AddMiddleware adds a middleware to the middleware chain.
-func (s *ContainerServer) AddMiddleware(middleware Middleware) {
-	s.middlewareChain = append(s.middlewareChain, middleware)
+// AddFilter adds a go-restful filter to the filter chain.
+func (s *ContainerServer) AddFilter(f Filter) {
+	s.filterChain.Add(f)
 }
 
 // AddHook registers a hook function for the specified hook type.
@@ -199,6 +199,8 @@ func (s *ContainerServer) Run(ctx context.Context) error {
 func (s *ContainerServer) setupRoutes() *restful.Container {
 	restContainer := restful.NewContainer()
 	restContainer.Router(restful.CurlyRouter{})
+
+	s.filterChain.AddToContainer(restContainer)
 
 	if s.resourceRegistry == nil {
 		return restContainer

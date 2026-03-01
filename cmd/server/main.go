@@ -27,9 +27,9 @@ func main() {
 		securePort       = flag.Int("secure-port", 6443, "secure port")
 		insecurePort     = flag.Int("insecure-port", 8080, "insecure port")
 		dbDSN            = flag.String("db-dsn", "", "database DSN")
-		enableAudit      = flag.Bool("enable-audit", true, "enable audit middleware")
-		enableMetrics    = flag.Bool("enable-metrics", true, "enable metrics middleware")
-		enableLogging    = flag.Bool("enable-logging", true, "enable logging middleware")
+		enableAudit      = flag.Bool("enable-audit", true, "enable audit filter")
+		enableMetrics    = flag.Bool("enable-metrics", true, "enable metrics filter")
+		enableLogging    = flag.Bool("enable-logging", true, "enable logging filter")
 	)
 	flag.Parse()
 
@@ -100,29 +100,29 @@ func main() {
 	}
 
 	if *enableAudit {
-		auditMiddleware := middleware.NewAuditMiddleware(&middleware.AuditConfig{
+		auditFilter := middleware.NewAuditFilter(&middleware.AuditConfig{
 			Level: middleware.AuditLevelRequestResponse,
 		}, nil)
-		srv.AddMiddleware(auditMiddleware)
+		srv.AddFilter(auditFilter)
 	}
 
 	if *enableMetrics {
-		metricsMiddleware := middleware.NewMetricsMiddleware(&middleware.MetricsConfig{
+		metricsFilter := middleware.NewMetricsFilter(&middleware.MetricsConfig{
 			Enabled:   true,
 			Path:      "/metrics",
 			Namespace: "container_server",
 			Subsystem: "api",
 		})
-		srv.AddMiddleware(metricsMiddleware)
+		srv.AddFilter(metricsFilter)
 	}
 
 	if *enableLogging {
-		loggingMiddleware := middleware.NewLoggingMiddleware(&middleware.LoggingConfig{
+		loggingFilter := middleware.NewLoggingFilter(&middleware.LoggingConfig{
 			Enabled: true,
 			Level:   "info",
 			Format:  "json",
 		})
-		srv.AddMiddleware(loggingMiddleware)
+		srv.AddFilter(loggingFilter)
 	}
 
 	srv.AddHook(server.PostCreateHook, func(ctx context.Context, gvr schema.GroupVersionResource, obj runtime.Object) error {

@@ -6,12 +6,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emicklei/go-restful/v3"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-type MetricsMiddleware struct {
+// MetricsFilter implements metrics collection using go-restful filter.
+type MetricsFilter struct {
 	config           *MetricsConfig
 	requestCounter   *prometheus.CounterVec
 	requestDuration  *prometheus.HistogramVec
@@ -20,7 +22,8 @@ type MetricsMiddleware struct {
 	inFlightRequests *prometheus.GaugeVec
 }
 
-func NewMetricsMiddleware(config *MetricsConfig) *MetricsMiddleware {
+// NewMetricsFilter creates a new MetricsFilter.
+func NewMetricsFilter(config *MetricsConfig) *MetricsFilter {
 	if config.Namespace == "" {
 		config.Namespace = "container_server"
 	}
@@ -31,7 +34,7 @@ func NewMetricsMiddleware(config *MetricsConfig) *MetricsMiddleware {
 		config.Path = "/metrics"
 	}
 
-	m := &MetricsMiddleware{
+	f := &MetricsFilter{
 		config: config,
 		requestCounter: promauto.NewCounterVec(
 			prometheus.CounterOpts{
@@ -83,77 +86,82 @@ func NewMetricsMiddleware(config *MetricsConfig) *MetricsMiddleware {
 		),
 	}
 
-	return m
+	return f
 }
 
-func (m *MetricsMiddleware) Name() string {
+// Name returns the filter name.
+func (f *MetricsFilter) Name() string {
 	return "metrics"
 }
 
-func (m *MetricsMiddleware) Handler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !m.config.Enabled {
-			next.ServeHTTP(w, r)
-			return
-		}
+// Filter is the go-restful filter function for metrics collection.
+func (f *MetricsFilter) Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
+	if !f.config.Enabled {
+		chain.ProcessFilter(req, resp)
+		return
+	}
 
-		startTime := time.Now()
-		gvr, _, _, verb, _ := parseMetricsRequestPath(r.URL.Path)
+	startTime := time.Now()
+	gvr, _, _, verb, _ := parseMetricsRequestPath(req.Request.URL.Path)
 
-		labels := prometheus.Labels{
-			"method":   r.Method,
-			"path":     r.URL.Path,
-			"group":    gvr.Group,
-			"version":  gvr.Version,
-			"resource": gvr.Resource,
-			"verb":     verb,
-		}
+	labels := prometheus.Labels{
+		"method":   req.Request.Method,
+		"path":     req.Request.URL.Path,
+		"group":    gvr.Group,
+		"version":  gvr.Version,
+		"resource": gvr.Resource,
+		"verb":     verb,
+	}
 
-		m.inFlightRequests.With(labels).Inc()
-		defer m.inFlightRequests.With(labels).Dec()
+	f.inFlightRequests.With(labels).Inc()
+	defer f.inFlightRequests.With(labels).Dec()
 
-		rw := &metricsResponseWriter{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK,
-			size:           0,
-		}
+	rw := &metricsResponseWriter{
+		ResponseWriter: resp.ResponseWriter,
+		statusCode:     200,
+		size:           0,
+	}
+	resp.ResponseWriter = rw
 
-		next.ServeHTTP(rw, r)
+	chain.ProcessFilter(req, resp)
 
-		duration := time.Since(startTime).Seconds()
+	duration := time.Since(startTime).Seconds()
 
-		m.requestCounter.With(prometheus.Labels{
-			"method":   r.Method,
-			"path":     r.URL.Path,
-			"status":   strconv.Itoa(rw.statusCode),
-			"group":    gvr.Group,
-			"version":  gvr.Version,
-			"resource": gvr.Resource,
-			"verb":     verb,
-		}).Inc()
+	f.requestCounter.With(prometheus.Labels{
+		"method":   req.Request.Method,
+		"path":     req.Request.URL.Path,
+		"status":   strconv.Itoa(rw.statusCode),
+		"group":    gvr.Group,
+		"version":  gvr.Version,
+		"resource": gvr.Resource,
+		"verb":     verb,
+	}).Inc()
 
-		m.requestDuration.With(labels).Observe(duration)
-		m.requestSize.With(labels).Observe(float64(r.ContentLength))
-		m.responseSize.With(labels).Observe(float64(rw.size))
-	})
+	f.requestDuration.With(labels).Observe(duration)
+	f.requestSize.With(labels).Observe(float64(req.Request.ContentLength))
+	f.responseSize.With(labels).Observe(float64(rw.size))
 }
 
+// metricsResponseWriter wraps http.ResponseWriter to capture status code and size.
 type metricsResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	size       int
 }
 
+// WriteHeader captures the status code.
 func (rw *metricsResponseWriter) WriteHeader(statusCode int) {
 	rw.statusCode = statusCode
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
-func (rw *metricsResponseWriter) Write(b []byte) (int, error) {
-	rw.size += len(b)
-	return rw.ResponseWriter.Write(b)
+// Write captures the response size.
+func (rw *metricsResponseWriter) Write(data []byte) (int, error) {
+	rw.size += len(data)
+	return rw.ResponseWriter.Write(data)
 }
 
+// parseMetricsRequestPath parses the request path to extract GVR, namespace, name, verb, and subresource.
 func parseMetricsRequestPath(path string) (gvr schema.GroupVersionResource, namespace string, name string, verb string, subresource string) {
 	path = strings.Trim(path, "/")
 	parts := strings.Split(path, "/")

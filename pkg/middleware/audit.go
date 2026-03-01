@@ -9,124 +9,133 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emicklei/go-restful/v3"
 	"github.com/google/uuid"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-type AuditMiddleware struct {
+// AuditFilter implements audit logging using go-restful filter.
+type AuditFilter struct {
 	config  *AuditConfig
 	auditor Auditor
 }
 
+// Auditor interface for recording audit events.
 type Auditor interface {
 	Record(ctx context.Context, event *AuditEvent) error
 }
 
-func NewAuditMiddleware(config *AuditConfig, auditor Auditor) *AuditMiddleware {
-	return &AuditMiddleware{
+// NewAuditFilter creates a new AuditFilter.
+func NewAuditFilter(config *AuditConfig, auditor Auditor) *AuditFilter {
+	return &AuditFilter{
 		config:  config,
 		auditor: auditor,
 	}
 }
 
-func (m *AuditMiddleware) Name() string {
+// Name returns the filter name.
+func (f *AuditFilter) Name() string {
 	return "audit"
 }
 
-func (m *AuditMiddleware) Handler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if m.config.Level == AuditLevelNone {
-			next.ServeHTTP(w, r)
-			return
-		}
+// Filter is the go-restful filter function for audit logging.
+func (f *AuditFilter) Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
+	if f.config.Level == AuditLevelNone {
+		chain.ProcessFilter(req, resp)
+		return
+	}
 
-		startTime := time.Now()
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = uuid.New().String()
-		}
+	startTime := time.Now()
+	requestID := req.HeaderParameter("X-Request-ID")
+	if requestID == "" {
+		requestID = uuid.New().String()
+	}
 
-		gvr, namespace, name, verb, _ := parseRequestPath(r.URL.Path)
+	gvr, namespace, name, verb, _ := parseRequestPath(req.Request.URL.Path)
 
-		event := &AuditEvent{
-			Stage:      "RequestReceived",
-			RequestURI: r.URL.String(),
-			Verb:       verb,
-			User:       nil,
-			SourceIPs:  []string{r.RemoteAddr},
-			UserAgent:  r.UserAgent(),
-			ObjectRef: &ObjectReference{
-				Group:     gvr.Group,
-				Version:   gvr.Version,
-				Resource:  gvr.Resource,
-				Namespace: namespace,
-				Name:      name,
-			},
-			Timestamp:   startTime,
-			Annotations: make(map[string]string),
-		}
+	event := &AuditEvent{
+		Stage:      "RequestReceived",
+		RequestURI: req.Request.URL.String(),
+		Verb:       verb,
+		User:       nil,
+		SourceIPs:  []string{req.Request.RemoteAddr},
+		UserAgent:  req.HeaderParameter("User-Agent"),
+		ObjectRef: &ObjectReference{
+			Group:     gvr.Group,
+			Version:   gvr.Version,
+			Resource:  gvr.Resource,
+			Namespace: namespace,
+			Name:      name,
+		},
+		Timestamp:   startTime,
+		Annotations: make(map[string]string),
+	}
 
-		if m.config.Level == AuditLevelRequest || m.config.Level == AuditLevelRequestResponse {
-			if r.Body != nil {
-				bodyBytes, _ := io.ReadAll(r.Body)
-				r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-				var obj interface{}
-				if err := json.Unmarshal(bodyBytes, &obj); err == nil {
-					event.RequestObject = obj
-				}
-			}
-		}
-
-		ctx := context.WithValue(r.Context(), "audit_event", event)
-		ctx = context.WithValue(ctx, "request_id", requestID)
-		r = r.WithContext(ctx)
-
-		rw := &responseWriter{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK,
-			body:           &bytes.Buffer{},
-		}
-
-		next.ServeHTTP(rw, r)
-
-		event.Duration = time.Since(startTime)
-		event.Stage = "ResponseComplete"
-		event.ResponseStatus = &metav1.Status{
-			Status:  metav1.StatusSuccess,
-			Code:    int32(rw.statusCode),
-			Message: http.StatusText(rw.statusCode),
-		}
-
-		if m.config.Level == AuditLevelRequestResponse && rw.body.Len() > 0 {
+	if f.config.Level == AuditLevelRequest || f.config.Level == AuditLevelRequestResponse {
+		if req.Request.Body != nil {
+			bodyBytes, _ := io.ReadAll(req.Request.Body)
+			req.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 			var obj interface{}
-			if err := json.Unmarshal(rw.body.Bytes(), &obj); err == nil {
-				event.ResponseObject = obj
+			if err := json.Unmarshal(bodyBytes, &obj); err == nil {
+				event.RequestObject = obj
 			}
 		}
+	}
 
-		if m.auditor != nil {
-			m.auditor.Record(ctx, event)
+	ctx := context.WithValue(req.Request.Context(), "audit_event", event)
+	ctx = context.WithValue(ctx, "request_id", requestID)
+	req.Request = req.Request.WithContext(ctx)
+
+	rw := &auditResponseWriter{
+		ResponseWriter: resp.ResponseWriter,
+		statusCode:     200,
+		body:           &bytes.Buffer{},
+	}
+	resp.ResponseWriter = rw
+
+	chain.ProcessFilter(req, resp)
+
+	event.Duration = time.Since(startTime)
+	event.Stage = "ResponseComplete"
+	event.ResponseStatus = &metav1.Status{
+		Status:  metav1.StatusSuccess,
+		Code:    int32(rw.statusCode),
+		Message: "OK",
+	}
+
+	if f.config.Level == AuditLevelRequestResponse && rw.body.Len() > 0 {
+		var obj interface{}
+		if err := json.Unmarshal(rw.body.Bytes(), &obj); err == nil {
+			event.ResponseObject = obj
 		}
-	})
+	}
+
+	if f.auditor != nil {
+		f.auditor.Record(ctx, event)
+	}
 }
 
-type responseWriter struct {
+// auditResponseWriter wraps http.ResponseWriter to capture response data.
+type auditResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	body       *bytes.Buffer
 }
 
-func (rw *responseWriter) WriteHeader(statusCode int) {
+// WriteHeader captures the status code.
+func (rw *auditResponseWriter) WriteHeader(statusCode int) {
 	rw.statusCode = statusCode
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
-func (rw *responseWriter) Write(b []byte) (int, error) {
-	rw.body.Write(b)
-	return rw.ResponseWriter.Write(b)
+// Write captures the response body.
+func (rw *auditResponseWriter) Write(data []byte) (int, error) {
+	rw.body.Write(data)
+	return rw.ResponseWriter.Write(data)
 }
 
+// parseRequestPath parses the request path to extract GVR, namespace, name, verb, and subresource.
 func parseRequestPath(path string) (gvr schema.GroupVersionResource, namespace string, name string, verb string, subresource string) {
 	path = strings.Trim(path, "/")
 	parts := strings.Split(path, "/")

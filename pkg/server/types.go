@@ -6,6 +6,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/emicklei/go-restful/v3"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -59,16 +60,16 @@ type MiddlewareConfig struct {
 }
 
 // ContainerServer is the main server that handles API requests.
-// It manages resource storage, middleware chain, and hooks.
+// It manages resource storage, filter chain, and hooks.
 type ContainerServer struct {
-	config          *Config
-	scheme          *runtime.Scheme
-	proxyTransport  http.RoundTripper
-	kubeRESTConfig  *rest.Config
-	middlewareChain []Middleware
-	storageRegistry map[schema.GroupVersionResource]registry.Storage
+	config           *Config
+	scheme           *runtime.Scheme
+	proxyTransport   http.RoundTripper
+	kubeRESTConfig   *rest.Config
+	filterChain      *FilterChain
+	storageRegistry  map[schema.GroupVersionResource]registry.Storage
 	resourceRegistry *registry.ResourceRegistry
-	hookRegistry    *HookRegistry
+	hookRegistry     *HookRegistry
 }
 
 // APIGroupInfo contains information about an API group.
@@ -133,12 +134,36 @@ const (
 	VerbWatch  Verb = "watch"
 )
 
-// Middleware is the interface for HTTP middleware.
-type Middleware interface {
-	// Name returns the middleware name
+// Filter is the interface for go-restful filters.
+type Filter interface {
+	// Name returns the filter name for identification.
 	Name() string
-	// Handler wraps the next handler
-	Handler(next http.Handler) http.Handler
+	// Filter is the go-restful filter function.
+	Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain)
+}
+
+// FilterChain manages a chain of go-restful filters.
+type FilterChain struct {
+	filters []Filter
+}
+
+// NewFilterChain creates a new empty filter chain.
+func NewFilterChain() *FilterChain {
+	return &FilterChain{
+		filters: make([]Filter, 0),
+	}
+}
+
+// Add appends a filter to the chain.
+func (c *FilterChain) Add(f Filter) {
+	c.filters = append(c.filters, f)
+}
+
+// AddToContainer adds all filters to the go-restful container.
+func (c *FilterChain) AddToContainer(container *restful.Container) {
+	for _, f := range c.filters {
+		container.Filter(f.Filter)
+	}
 }
 
 // RESTStorageOptions contains options for REST storage registration.

@@ -1,52 +1,59 @@
 // Package middleware provides HTTP middleware implementations for the API server.
 // It includes audit logging, metrics collection, and request logging middleware.
+// All middleware implementations use go-restful Filter mechanism.
 package middleware
 
 import (
-	"net/http"
 	"time"
 
+	"github.com/emicklei/go-restful/v3"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-// Middleware is the interface for HTTP middleware.
-type Middleware interface {
-	// Name returns the middleware name for identification.
+// Filter is the interface for go-restful middleware filters.
+type Filter interface {
+	// Name returns the filter name for identification.
 	Name() string
-	// Handler wraps the next HTTP handler with middleware functionality.
-	Handler(next http.Handler) http.Handler
+	// Filter is the go-restful filter function.
+	Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain)
 }
 
-// MiddlewareChain manages a chain of middleware.
-// Middleware is executed in the order they were added.
-type MiddlewareChain struct {
-	middlewares []Middleware
+// FilterChain manages a chain of filters.
+// Filters are executed in the order they were added.
+type FilterChain struct {
+	filters []Filter
 }
 
-// NewMiddlewareChain creates a new empty middleware chain.
-func NewMiddlewareChain() *MiddlewareChain {
-	return &MiddlewareChain{
-		middlewares: make([]Middleware, 0),
+// NewFilterChain creates a new empty filter chain.
+func NewFilterChain() *FilterChain {
+	return &FilterChain{
+		filters: make([]Filter, 0),
 	}
 }
 
-// Add appends a middleware to the chain.
-func (c *MiddlewareChain) Add(m Middleware) {
-	c.middlewares = append(c.middlewares, m)
+// Add appends a filter to the chain.
+func (c *FilterChain) Add(f Filter) {
+	c.filters = append(c.filters, f)
 }
 
-// Handler builds the final handler by chaining all middleware.
-// Middleware is executed in reverse order so that the first added
-// middleware is the outermost wrapper.
-func (c *MiddlewareChain) Handler(final http.Handler) http.Handler {
-	for i := len(c.middlewares) - 1; i >= 0; i-- {
-		final = c.middlewares[i].Handler(final)
+// AddToContainer adds all filters to the go-restful container.
+// Filters are added in order so that the first added filter is executed first.
+func (c *FilterChain) AddToContainer(container *restful.Container) {
+	for _, f := range c.filters {
+		container.Filter(f.Filter)
 	}
-	return final
 }
 
-// RequestContext contains request-scoped information passed through middleware.
+// AddToWebService adds all filters to the go-restful webservice.
+// Filters are added in order so that the first added filter is executed first.
+func (c *FilterChain) AddToWebService(ws *restful.WebService) {
+	for _, f := range c.filters {
+		ws.Filter(f.Filter)
+	}
+}
+
+// RequestContext contains request-scoped information passed through filters.
 type RequestContext struct {
 	// RequestID is a unique identifier for the request
 	RequestID string
@@ -127,13 +134,13 @@ const (
 	AuditLevelNone AuditLevel = "None"
 	// AuditLevelMetadata logs only request metadata
 	AuditLevelMetadata AuditLevel = "Metadata"
-	// AuditLevelMetadata logs request metadata and request body
+	// AuditLevelRequest logs request metadata and request body
 	AuditLevelRequest AuditLevel = "Request"
 	// AuditLevelRequestResponse logs request metadata, request body, and response body
 	AuditLevelRequestResponse AuditLevel = "RequestResponse"
 )
 
-// AuditConfig holds configuration for audit middleware.
+// AuditConfig holds configuration for audit filter.
 type AuditConfig struct {
 	// Level is the audit logging level
 	Level AuditLevel
@@ -147,7 +154,7 @@ type AuditConfig struct {
 	MaxSize int
 }
 
-// MetricsConfig holds configuration for metrics middleware.
+// MetricsConfig holds configuration for metrics filter.
 type MetricsConfig struct {
 	// Enabled indicates if metrics collection is enabled
 	Enabled bool
@@ -159,7 +166,7 @@ type MetricsConfig struct {
 	Subsystem string
 }
 
-// LoggingConfig holds configuration for logging middleware.
+// LoggingConfig holds configuration for logging filter.
 type LoggingConfig struct {
 	// Enabled indicates if request logging is enabled
 	Enabled bool

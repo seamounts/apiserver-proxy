@@ -5,16 +5,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/emicklei/go-restful/v3"
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
-type LoggingMiddleware struct {
+// LoggingFilter implements request logging using go-restful filter.
+type LoggingFilter struct {
 	config *LoggingConfig
 	logger *zap.Logger
 }
 
-func NewLoggingMiddleware(config *LoggingConfig) *LoggingMiddleware {
+// NewLoggingFilter creates a new LoggingFilter.
+func NewLoggingFilter(config *LoggingConfig) *LoggingFilter {
 	var logger *zap.Logger
 	var err error
 
@@ -31,76 +34,80 @@ func NewLoggingMiddleware(config *LoggingConfig) *LoggingMiddleware {
 		logger = zap.NewNop()
 	}
 
-	return &LoggingMiddleware{
+	return &LoggingFilter{
 		config: config,
 		logger: logger,
 	}
 }
 
-func (m *LoggingMiddleware) Name() string {
+// Name returns the filter name.
+func (f *LoggingFilter) Name() string {
 	return "logging"
 }
 
-func (m *LoggingMiddleware) Handler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		startTime := time.Now()
+// Filter is the go-restful filter function for request logging.
+func (f *LoggingFilter) Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
+	startTime := time.Now()
 
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = "unknown"
-		}
+	requestID := req.HeaderParameter("X-Request-ID")
+	if requestID == "" {
+		requestID = "unknown"
+	}
 
-		gvr, namespace, name, verb, _ := parseLoggingRequestPath(r.URL.Path)
+	gvr, namespace, name, verb, _ := parseLoggingRequestPath(req.Request.URL.Path)
 
-		m.logger.Info("request started",
-			zap.String("request_id", requestID),
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.String("remote_addr", r.RemoteAddr),
-			zap.String("user_agent", r.UserAgent()),
-			zap.String("group", gvr.Group),
-			zap.String("version", gvr.Version),
-			zap.String("resource", gvr.Resource),
-			zap.String("namespace", namespace),
-			zap.String("name", name),
-			zap.String("verb", verb),
-		)
+	f.logger.Info("request started",
+		zap.String("request_id", requestID),
+		zap.String("method", req.Request.Method),
+		zap.String("path", req.Request.URL.Path),
+		zap.String("remote_addr", req.Request.RemoteAddr),
+		zap.String("user_agent", req.HeaderParameter("User-Agent")),
+		zap.String("group", gvr.Group),
+		zap.String("version", gvr.Version),
+		zap.String("resource", gvr.Resource),
+		zap.String("namespace", namespace),
+		zap.String("name", name),
+		zap.String("verb", verb),
+	)
 
-		rw := &loggingResponseWriter{
-			ResponseWriter: w,
-			statusCode:     http.StatusOK,
-		}
+	rw := &loggingResponseWriter{
+		ResponseWriter: resp.ResponseWriter,
+		statusCode:     200,
+	}
+	resp.ResponseWriter = rw
 
-		next.ServeHTTP(rw, r)
+	chain.ProcessFilter(req, resp)
 
-		duration := time.Since(startTime)
+	duration := time.Since(startTime)
 
-		m.logger.Info("request completed",
-			zap.String("request_id", requestID),
-			zap.String("method", r.Method),
-			zap.String("path", r.URL.Path),
-			zap.Int("status", rw.statusCode),
-			zap.Duration("duration", duration),
-			zap.String("group", gvr.Group),
-			zap.String("version", gvr.Version),
-			zap.String("resource", gvr.Resource),
-			zap.String("namespace", namespace),
-			zap.String("name", name),
-			zap.String("verb", verb),
-		)
-	})
+	f.logger.Info("request completed",
+		zap.String("request_id", requestID),
+		zap.String("method", req.Request.Method),
+		zap.String("path", req.Request.URL.Path),
+		zap.Int("status", rw.statusCode),
+		zap.Duration("duration", duration),
+		zap.String("group", gvr.Group),
+		zap.String("version", gvr.Version),
+		zap.String("resource", gvr.Resource),
+		zap.String("namespace", namespace),
+		zap.String("name", name),
+		zap.String("verb", verb),
+	)
 }
 
+// loggingResponseWriter wraps http.ResponseWriter to capture status code.
 type loggingResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 }
 
+// WriteHeader captures the status code.
 func (rw *loggingResponseWriter) WriteHeader(statusCode int) {
 	rw.statusCode = statusCode
 	rw.ResponseWriter.WriteHeader(statusCode)
 }
 
+// parseLoggingRequestPath parses the request path to extract GVR, namespace, name, verb, and subresource.
 func parseLoggingRequestPath(path string) (gvr schema.GroupVersionResource, namespace string, name string, verb string, subresource string) {
 	path = strings.Trim(path, "/")
 	parts := strings.Split(path, "/")
