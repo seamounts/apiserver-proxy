@@ -8,6 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	appsv1 "github.com/seamounts/apiserver-proxy/pkg/api/apps/v1"
+	batchv1 "github.com/seamounts/apiserver-proxy/pkg/api/batch/v1"
+	corev1 "github.com/seamounts/apiserver-proxy/pkg/api/core/v1"
 	"github.com/seamounts/apiserver-proxy/pkg/middleware"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"github.com/seamounts/apiserver-proxy/pkg/server"
@@ -62,12 +65,16 @@ func main() {
 
 		resourceRegistry := registry.NewResourceRegistry()
 
-		storageFactory := registry.NewDefaultStorageFactory(func(gvr schema.GroupVersionResource) registry.Storage {
-			return &dbStorageAdapter{storage.NewDBStorage(db, nil, gvr)}
+		storageFactory := registry.StorageFactoryFunc(func(gvr schema.GroupVersionResource) (registry.Storage, error) {
+			return &dbStorageAdapter{DBStorage: storage.NewDBStorage(db, nil, gvr)}, nil
 		})
 
-		if err := resourceRegistry.RegisterFromConfig(storageFactory, registry.AllBuiltinResourcesConfigs()...); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to register builtin resources: %v\n", err)
+		if err := resourceRegistry.RegisterGroups(storageFactory,
+			corev1.NewCoreV1Group(),
+			appsv1.NewAppsV1Group(),
+			batchv1.NewBatchV1Group(),
+		); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to register groups: %v\n", err)
 			os.Exit(1)
 		}
 
@@ -87,9 +94,9 @@ func main() {
 			os.Exit(1)
 		}
 
-		for _, meta := range resourceRegistry.ListResources() {
-			srv.RegisterResource(meta.GVR, meta.Storage, nil)
-			fmt.Printf("Registered resource: %s\n", meta.GVR)
+		for _, info := range resourceRegistry.ListResources() {
+			srv.RegisterResource(info.GVR, info.Storage, nil)
+			fmt.Printf("Registered resource: %s\n", info.GVR)
 		}
 	}
 
