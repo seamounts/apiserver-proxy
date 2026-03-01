@@ -8,7 +8,7 @@ Container Server 是一个轻量级的容器服务 API 网关，参考 kube-apis
 
 - **API 注册机制**：支持注册 K8s 原生资源（Pod、Deployment 等）和自定义资源（CRD）
 - **client-go 兼容**：API 接口完全兼容 client-go 调用
-- **中间件系统**：支持审计、监控、日志等可插拔中间件
+- **中间件系统**：基于 go-restful Filter 机制，支持审计、监控、日志等可插拔过滤器
 - **智能代理**：自定义 handler 处理注册资源，未注册资源代理到 kube-apiserver
 - **数据持久化**：资源对象可存储到数据库
 - **子资源支持**：支持 status、scale 等子资源操作
@@ -16,7 +16,7 @@ Container Server 是一个轻量级的容器服务 API 网关，参考 kube-apis
 ### 1.2 设计原则
 
 1. **简化设计**：相比 kube-apiserver 移除认证、授权、准入控制等复杂功能
-2. **可扩展性**：通过中间件和 Hook 机制支持功能扩展
+2. **可扩展性**：通过 Filter 和 Hook 机制支持功能扩展
 3. **兼容性**：保持与 K8s API 语义兼容
 4. **模块化**：API 资源按 Group/Version 分层组织，每个资源独立文件
 5. **自动路由**：基于注册资源自动生成 go-restful 路由
@@ -36,7 +36,7 @@ Container Server 是一个轻量级的容器服务 API 网关，参考 kube-apis
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                          Container Server                                │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
-│  │                      Middleware Chain                             │   │
+│  │                    Filter Chain (go-restful)                      │   │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐                        │   │
 │  │  │  Audit   │→ │ Metrics  │→ │ Logging  │                        │   │
 │  │  └──────────┘  └──────────┘  └──────────┘                        │   │
@@ -101,17 +101,17 @@ d:\Workspace\code\apiserver\
 │   │   ├── registry.go         # ResourceRegistry, ResourceBuilder
 │   │   └── subresource.go      # SubresourceStorage 接口
 │   ├── server/                 # 核心服务层
-│   │   ├── types.go            # 类型定义
+│   │   ├── types.go            # 类型定义 (Filter, FilterChain, ContainerServer)
 │   │   ├── server.go           # 服务初始化和运行
 │   │   ├── handler.go          # REST 请求处理器
 │   │   └── proxy.go            # 代理到 kube-apiserver
 │   ├── storage/                # 存储层
 │   │   └── db_storage.go       # GORM 数据库实现
-│   ├── middleware/             # 中间件层
-│   │   ├── middleware.go       # 中间件接口
-│   │   ├── audit.go            # 审计中间件
-│   │   ├── metrics.go          # Prometheus 监控
-│   │   └── logging.go          # 日志中间件
+│   ├── middleware/             # 中间件层 (go-restful Filter)
+│   │   ├── middleware.go       # Filter 接口, FilterChain
+│   │   ├── audit.go            # 审计过滤器 (AuditFilter)
+│   │   ├── metrics.go          # Prometheus 监控 (MetricsFilter)
+│   │   └── logging.go          # 日志过滤器 (LoggingFilter)
 │   └── router/                 # 路由层
 │       └── router.go           # APIGroupInstaller, Router, Handlers
 ├── docs/
@@ -253,9 +253,124 @@ func (r *ResourceRegistry) ListResources() []*ResourceInfo
 func (r *ResourceRegistry) ListGroups() []*GroupInfo
 ```
 
-### 3.3 路由系统 (pkg/router)
+### 3.3 过滤器系统 (pkg/middleware)
 
-#### 3.3.1 Handlers 接口
+#### 3.3.1 Filter 接口
+
+基于 go-restful 的 Filter 机制，所有过滤器实现统一的接口：
+
+```go
+// Filter is the interface for go-restful middleware filters.
+type Filter interface {
+    // Name returns the filter name for identification.
+    Name() string
+    // Filter is the go-restful filter function.
+    Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain)
+}
+```
+
+#### 3.3.2 FilterChain
+
+```go
+// FilterChain manages a chain of go-restful filters.
+type FilterChain struct {
+    filters []Filter
+}
+
+// NewFilterChain creates a new empty filter chain.
+func NewFilterChain() *FilterChain
+
+// Add appends a filter to the chain.
+func (c *FilterChain) Add(f Filter)
+
+// AddToContainer adds all filters to the go-restful container.
+func (c *FilterChain) AddToContainer(container *restful.Container)
+
+// AddToWebService adds all filters to the go-restful webservice.
+func (c *FilterChain) AddToWebService(ws *restful.WebService)
+```
+
+#### 3.3.3 内置过滤器
+
+**AuditFilter - 审计过滤器**
+
+```go
+type AuditFilter struct {
+    config  *AuditConfig
+    auditor Auditor
+}
+
+func NewAuditFilter(config *AuditConfig, auditor Auditor) *AuditFilter
+
+// 支持的审计级别
+const (
+    AuditLevelNone            AuditLevel = "None"            // 禁用审计
+    AuditLevelMetadata        AuditLevel = "Metadata"        // 仅记录元数据
+    AuditLevelRequest         AuditLevel = "Request"         // 记录请求体
+    AuditLevelRequestResponse AuditLevel = "RequestResponse" // 记录请求和响应
+)
+```
+
+**MetricsFilter - 监控过滤器**
+
+```go
+type MetricsFilter struct {
+    config           *MetricsConfig
+    requestCounter   *prometheus.CounterVec   // 请求计数
+    requestDuration  *prometheus.HistogramVec // 请求延迟
+    requestSize      *prometheus.HistogramVec // 请求大小
+    responseSize     *prometheus.HistogramVec // 响应大小
+    inFlightRequests *prometheus.GaugeVec     // 在途请求数
+}
+
+func NewMetricsFilter(config *MetricsConfig) *MetricsFilter
+```
+
+**LoggingFilter - 日志过滤器**
+
+```go
+type LoggingFilter struct {
+    config *LoggingConfig
+    logger *zap.Logger
+}
+
+func NewLoggingFilter(config *LoggingConfig) *LoggingFilter
+```
+
+#### 3.3.4 过滤器使用示例
+
+```go
+// 在 main.go 中注册过滤器
+if *enableAudit {
+    auditFilter := middleware.NewAuditFilter(&middleware.AuditConfig{
+        Level: middleware.AuditLevelRequestResponse,
+    }, nil)
+    srv.AddFilter(auditFilter)
+}
+
+if *enableMetrics {
+    metricsFilter := middleware.NewMetricsFilter(&middleware.MetricsConfig{
+        Enabled:   true,
+        Path:      "/metrics",
+        Namespace: "container_server",
+        Subsystem: "api",
+    })
+    srv.AddFilter(metricsFilter)
+}
+
+if *enableLogging {
+    loggingFilter := middleware.NewLoggingFilter(&middleware.LoggingConfig{
+        Enabled: true,
+        Level:   "info",
+        Format:  "json",
+    })
+    srv.AddFilter(loggingFilter)
+}
+```
+
+### 3.4 路由系统 (pkg/router)
+
+#### 3.4.1 Handlers 接口
 
 ```go
 type HandlerFunc func(req *restful.Request, resp *restful.Response, info *registry.ResourceInfo)
@@ -276,7 +391,7 @@ type Handlers struct {
 }
 ```
 
-#### 3.3.2 APIGroupInstaller
+#### 3.4.2 APIGroupInstaller
 
 ```go
 type APIGroupInstaller struct {
@@ -289,7 +404,7 @@ type APIGroupInstaller struct {
 func (i *APIGroupInstaller) Install() *restful.WebService
 ```
 
-#### 3.3.3 Router
+#### 3.4.3 Router
 
 ```go
 type Router struct {
@@ -301,9 +416,9 @@ func (r *Router) InstallAll() []*restful.WebService
 func InstallAPIGroupsHandler(reg *registry.ResourceRegistry) *restful.WebService
 ```
 
-### 3.4 服务核心 (pkg/server)
+### 3.5 服务核心 (pkg/server)
 
-#### 3.4.1 ContainerServer
+#### 3.5.1 ContainerServer
 
 ```go
 type ContainerServer struct {
@@ -311,17 +426,26 @@ type ContainerServer struct {
     scheme           *runtime.Scheme
     proxyTransport   http.RoundTripper
     kubeRESTConfig   *rest.Config
-    middlewareChain  []Middleware
+    filterChain      *FilterChain              // go-restful 过滤器链
     storageRegistry  map[schema.GroupVersionResource]Storage
     resourceRegistry *registry.ResourceRegistry
     hookRegistry     *HookRegistry
 }
+
+// AddFilter adds a go-restful filter to the filter chain.
+func (s *ContainerServer) AddFilter(f Filter)
 ```
 
-#### 3.4.2 setupRoutes 自动路由生成
+#### 3.5.2 setupRoutes 自动路由生成
 
 ```go
 func (s *ContainerServer) setupRoutes() *restful.Container {
+    restContainer := restful.NewContainer()
+    restContainer.Router(restful.CurlyRouter{})
+
+    // 应用过滤器链到 Container
+    s.filterChain.AddToContainer(restContainer)
+
     handlers := &router.Handlers{
         List:              s.handleResourceList,
         Create:            s.handleResourceCreate,
@@ -342,14 +466,16 @@ func (s *ContainerServer) setupRoutes() *restful.Container {
 }
 ```
 
-### 3.5 请求处理流程
+### 3.6 请求处理流程
 
 ```
 HTTP Request
      │
      ▼
 ┌─────────────────┐
-│ Middleware Chain│  审计、监控、日志
+│ Filter Chain    │  go-restful Filter 机制
+│ (Audit/Metrics/ │  审计、监控、日志
+│  Logging)       │
 └─────────────────┘
      │
      ▼
@@ -379,9 +505,9 @@ HTTP Request
 HTTP Response
 ```
 
-### 3.6 自动生成的路由
+### 3.7 自动生成的路由
 
-#### 3.6.1 命名空间资源路由
+#### 3.7.1 命名空间资源路由
 
 ```
 GET    /api/v1/namespaces/{namespace}/pods
@@ -393,7 +519,7 @@ GET    /api/v1/namespaces/{namespace}/pods/{name}/status
 PUT    /api/v1/namespaces/{namespace}/pods/{name}/status
 ```
 
-#### 3.6.2 集群资源路由
+#### 3.7.2 集群资源路由
 
 ```
 GET    /api/v1/nodes
@@ -403,7 +529,7 @@ PUT    /api/v1/nodes/{name}
 DELETE /api/v1/nodes/{name}
 ```
 
-#### 3.6.3 Group API 路由
+#### 3.7.3 Group API 路由
 
 ```
 GET    /apis/apps/v1/namespaces/{namespace}/deployments
@@ -413,7 +539,7 @@ PUT    /apis/apps/v1/namespaces/{namespace}/deployments/{name}
 DELETE /apis/apps/v1/namespaces/{namespace}/deployments/{name}
 ```
 
-### 3.7 Hook 机制
+### 3.8 Hook 机制
 
 ```go
 const (
@@ -571,6 +697,45 @@ func (s *MyResourceStorage) Create(ctx context.Context, obj runtime.Object, ...)
 }
 ```
 
+### 5.4 添加自定义过滤器
+
+```go
+// 1. 实现 Filter 接口
+type CustomFilter struct {
+    config *CustomConfig
+}
+
+func NewCustomFilter(config *CustomConfig) *CustomFilter {
+    return &CustomFilter{config: config}
+}
+
+func (f *CustomFilter) Name() string {
+    return "custom"
+}
+
+func (f *CustomFilter) Filter(req *restful.Request, resp *restful.Response, chain *restful.FilterChain) {
+    // 前置处理
+    startTime := time.Now()
+    
+    // 包装 ResponseWriter 以捕获响应
+    rw := &customResponseWriter{
+        ResponseWriter: resp.ResponseWriter,
+    }
+    resp.ResponseWriter = rw
+    
+    // 调用下一个过滤器
+    chain.ProcessFilter(req, resp)
+    
+    // 后置处理
+    duration := time.Since(startTime)
+    // ...
+}
+
+// 2. 注册过滤器
+customFilter := NewCustomFilter(&CustomConfig{...})
+srv.AddFilter(customFilter)
+```
+
 ---
 
 ## 6. 部署与使用
@@ -590,9 +755,9 @@ go build ./cmd/server
 | `-insecure-port` | HTTP 端口 | 8080 |
 | `-secure-port` | HTTPS 端口 | 6443 |
 | `-db-dsn` | 数据库连接字符串 | "" |
-| `-enable-audit` | 启用审计 | true |
-| `-enable-metrics` | 启用监控 | true |
-| `-enable-logging` | 启用日志 | true |
+| `-enable-audit` | 启用审计过滤器 | true |
+| `-enable-metrics` | 启用监控过滤器 | true |
+| `-enable-logging` | 启用日志过滤器 | true |
 
 ### 6.3 启动示例
 
@@ -614,6 +779,7 @@ go build ./cmd/server
 | 组件 | 技术选型 | 说明 |
 |-----|---------|------|
 | HTTP 框架 | go-restful | K8s 同款 REST 框架 |
+| 中间件机制 | go-restful Filter | Container/WebService 级别过滤器 |
 | K8s API | client-go, apimachinery | 官方 SDK |
 | ORM | GORM | 数据库操作 |
 | 数据库 | MySQL | 资源持久化 |
@@ -632,7 +798,7 @@ go build ./cmd/server
 | Etcd 存储 | ✓ 原生支持 | ✗ 不支持 |
 | Watch | ✓ 支持 | ✗ 数据库不支持 |
 | 自定义存储 | ✗ 仅 Etcd | ✓ 可扩展 |
-| 中间件 | ✗ 固定流程 | ✓ 可插拔 |
+| 中间件 | ✗ 固定流程 | ✓ go-restful Filter |
 | Hook | ✗ 通过 Admission | ✓ 内置支持 |
 | 代理模式 | ✗ Aggregation Layer | ✓ 内置支持 |
 | 子资源 | ✓ 支持 | ✓ 支持 |
