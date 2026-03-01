@@ -1,6 +1,7 @@
 package corev1
 
 import (
+	"github.com/seamounts/apiserver-proxy/pkg/api/types"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -13,7 +14,7 @@ func NewConfigMapStorage(s registry.Storage) registry.Storage {
 	return &ConfigMapStorage{Storage: s}
 }
 
-var ConfigMapResource = ResourceStorage{
+var ConfigMapResource = types.APIResource{
 	SingularName:    "configmap",
 	NamespaceScoped: true,
 	ShortNames:      []string{"cm"},

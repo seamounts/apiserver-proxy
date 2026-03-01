@@ -3,6 +3,7 @@ package corev1
 import (
 	"fmt"
 
+	"github.com/seamounts/apiserver-proxy/pkg/api/types"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -20,7 +21,7 @@ func (g *CoreV1Group) GroupName() string {
 func (g *CoreV1Group) RegisterResources(r *registry.ResourceRegistry, factory registry.StorageFactory) error {
 	gv := schema.GroupVersion{Group: "", Version: "v1"}
 
-	resources := map[string]ResourceStorage{
+	resources := map[string]types.APIResource{
 		"pods":       PodResource,
 		"services":   ServiceResource,
 		"configmaps": ConfigMapResource,

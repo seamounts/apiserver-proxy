@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/seamounts/apiserver-proxy/pkg/api/types"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,7 +55,7 @@ func (s *DeploymentStorage) List(ctx context.Context, options *metav1.ListOption
 	return s.Storage.List(ctx, options)
 }
 
-var DeploymentResource = ResourceStorage{
+var DeploymentResource = types.APIResource{
 	SingularName:    "deployment",
 	NamespaceScoped: true,
 	ShortNames:      []string{"deploy"},

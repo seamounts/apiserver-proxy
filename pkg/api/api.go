@@ -4,7 +4,8 @@ import (
 	"fmt"
 
 	"github.com/seamounts/apiserver-proxy/pkg/api/appsv1"
-	"github.com/seamounts/apiserver-proxy/pkg/api/batchv1"
+	// 暂时移除 batchv1 导入，待补充缺失的元数据后再启用
+	// "github.com/seamounts/apiserver-proxy/pkg/api/batchv1"
 	"github.com/seamounts/apiserver-proxy/pkg/api/corev1"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 )
@@ -49,6 +50,6 @@ func DefaultAPIManager() *APIManager {
 	m := NewAPIManager()
 	m.RegisterGroup(corev1.NewCoreV1Group())
 	m.RegisterGroup(appsv1.NewAppsV1Group())
-	m.RegisterGroup(batchv1.NewBatchV1Group())
+	// 暂时跳过
 	return m
 }

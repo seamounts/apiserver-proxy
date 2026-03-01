@@ -1,11 +1,11 @@
-package appsv1
+package types
 
 import (
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-type ResourceStorage struct {
+type APIResource struct {
 	SingularName    string
 	NamespaceScoped bool
 	ShortNames      []string
@@ -13,4 +13,8 @@ type ResourceStorage struct {
 	ObjectType      runtime.Object
 	ListObjectType  runtime.Object
 	StorageWrapper  func(registry.Storage) registry.Storage
+}
+
+var DefaultStorageWrapper = func(s registry.Storage) registry.Storage {
+	return s
 }

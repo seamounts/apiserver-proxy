@@ -3,6 +3,7 @@ package appsv1
 import (
 	"fmt"
 
+	"github.com/seamounts/apiserver-proxy/pkg/api/types"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
@@ -20,7 +21,7 @@ func (g *AppsV1Group) GroupName() string {
 func (g *AppsV1Group) RegisterResources(r *registry.ResourceRegistry, factory registry.StorageFactory) error {
 	gv := schema.GroupVersion{Group: "apps", Version: "v1"}
 
-	resources := map[string]ResourceStorage{
+	resources := map[string]types.APIResource{
 		"deployments":  DeploymentResource,
 		"replicasets": ReplicaSetResource,
 	}

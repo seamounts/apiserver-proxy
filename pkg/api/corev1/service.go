@@ -1,6 +1,7 @@
 package corev1
 
 import (
+	"github.com/seamounts/apiserver-proxy/pkg/api/types"
 	"github.com/seamounts/apiserver-proxy/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -13,7 +14,7 @@ func NewServiceStorage(s registry.Storage) registry.Storage {
 	return &ServiceStorage{Storage: s}
 }
 
-var ServiceResource = ResourceStorage{
+var ServiceResource = types.APIResource{
 	SingularName:    "service",
 	NamespaceScoped: true,
 	ShortNames:      []string{"svc"},
